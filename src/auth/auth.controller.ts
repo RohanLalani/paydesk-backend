@@ -8,34 +8,40 @@ import { AuthService } from './auth.service';
 
 @Controller('auth')
 export class AuthController {
+
   constructor(
     private readonly authService: AuthService,
   ) {}
 
-  // ✅ REGISTER
-  @Post('register')
-  register(
+  //
+  // OWNER REGISTER
+  //
+  @Post('owner/register')
+  registerOwner(
     @Body()
     body: {
       email: string;
       password: string;
-      role: string;
       name?: string;
     },
   ) {
-    return this.authService.register(body);
+    return this.authService.registerOwner(
+      body,
+    );
   }
 
-  // ✅ LOGIN
-  @Post('login')
-  login(
+  //
+  // OWNER LOGIN
+  //
+  @Post('owner/login')
+  loginOwner(
     @Body()
     body: {
       email: string;
       password: string;
     },
   ) {
-    return this.authService.login(
+    return this.authService.loginOwner(
       body.email,
       body.password,
     );

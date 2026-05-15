@@ -8,61 +8,73 @@ import * as jwt from 'jsonwebtoken';
 export class AuthService {
   constructor(private prisma: PrismaService) {}
 
-  // ✅ REGISTER
-  async register(data: {
+  //
+  // OWNER REGISTER
+  //
+  async registerOwner(data: {
     email: string;
     password: string;
-    role: string;
     name?: string;
   }) {
-    const existingUser = await this.prisma.user.findUnique({
-      where: {
-        email: data.email,
-      },
-    });
 
-    if (existingUser) {
+    const existingOwner =
+      await this.prisma.owner.findUnique({
+        where: {
+          email: data.email,
+        },
+      });
+
+    if (existingOwner) {
       return {
-        error: 'User already exists',
+        error: 'Owner already exists',
       };
     }
 
-    const hashedPassword = await bcrypt.hash(
-      data.password,
-      10,
-    );
+    const hashedPassword =
+      await bcrypt.hash(data.password, 10);
 
-    const user = await this.prisma.user.create({
-      data: {
-        email: data.email,
-        password: hashedPassword,
-        role: data.role,
-        name: data.name,
-      },
-    });
+    const owner =
+      await this.prisma.owner.create({
+        data: {
+          email: data.email,
+          password: hashedPassword,
+          name: data.name,
+        },
+      });
+
+    // ✅ REMOVE PASSWORD FROM RESPONSE
+    const { password, ...safeOwner } = owner;
 
     return {
-      message: 'User created',
-      user,
+      message: 'Owner created',
+      owner: safeOwner,
     };
   }
 
-  // ✅ LOGIN
-  async login(email: string, password: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { email },
-    });
+  //
+  // OWNER LOGIN
+  //
+  async loginOwner(
+    email: string,
+    password: string,
+  ) {
 
-    if (!user) {
+    const owner =
+      await this.prisma.owner.findUnique({
+        where: { email },
+      });
+
+    if (!owner) {
       return {
         error: 'Invalid credentials',
       };
     }
 
-    const validPassword = await bcrypt.compare(
-      password,
-      user.password,
-    );
+    const validPassword =
+      await bcrypt.compare(
+        password,
+        owner.password,
+      );
 
     if (!validPassword) {
       return {
@@ -72,8 +84,8 @@ export class AuthService {
 
     const token = jwt.sign(
       {
-        userId: user.id,
-        role: user.role,
+        ownerId: owner.id,
+        type: 'owner',
       },
       process.env.JWT_SECRET || 'secret',
       {
@@ -81,9 +93,12 @@ export class AuthService {
       },
     );
 
+    // ✅ REMOVE PASSWORD FROM RESPONSE
+    const { password: _, ...safeOwner } = owner;
+
     return {
       token,
-      user,
+      owner: safeOwner,
     };
   }
 }

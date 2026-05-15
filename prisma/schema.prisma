@@ -8,23 +8,68 @@ datasource db {
 }
 
 //
-// USERS
+// OWNERS
 //
 
-model User {
-  id       String  @id @default(uuid())
-  email    String  @unique
+model Owner {
+  id String @id @default(uuid())
+
+  email    String @unique
   password String
-  role     String
-  name     String?
+
+  name String?
 
   createdAt DateTime @default(now())
 
   // Relations
-  stores        Store[]
+  stores Store[]
+}
+
+//
+// EMPLOYEES
+//
+
+model Employee {
+  id String @id @default(uuid())
+
+  email    String @unique
+  password String
+
+  name String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  employeeStores EmployeeStore[]
+
   shifts        Shift[]
   transactions  Transaction[]
   inventoryLogs InventoryLog[]
+}
+
+//
+// EMPLOYEE ↔ STORE RELATION
+//
+
+model EmployeeStore {
+  id String @id @default(uuid())
+
+  role String
+  // cashier
+  // manager
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  @@unique([employeeId, storeId])
 }
 
 //
@@ -40,8 +85,10 @@ model Store {
   createdAt DateTime @default(now())
 
   // Relations
-  ownerId String?
-  owner   User?   @relation(fields: [ownerId], references: [id])
+  ownerId String
+  owner   Owner  @relation(fields: [ownerId], references: [id])
+
+  employeeStores EmployeeStore[]
 
   products       Product[]
   productGroups  ProductGroup[]
@@ -75,7 +122,8 @@ model ProductGroup {
 //
 
 model Product {
-  id      String @id @default(uuid())
+  id String @id @default(uuid())
+
   name    String
   barcode String @unique
 
@@ -139,8 +187,8 @@ model Shift {
   endTime   DateTime?
 
   // Relations
-  userId String
-  user   User   @relation(fields: [userId], references: [id])
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
@@ -166,8 +214,8 @@ model Transaction {
   createdAt DateTime @default(now())
 
   // Relations
-  userId String
-  user   User   @relation(fields: [userId], references: [id])
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
@@ -222,8 +270,8 @@ model InventoryLog {
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
 
-  userId String?
-  user   User?   @relation(fields: [userId], references: [id])
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id])
 
   transactionId String?
   transaction   Transaction? @relation(fields: [transactionId], references: [id])
