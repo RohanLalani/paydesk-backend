@@ -17,12 +17,19 @@ model Owner {
   email    String @unique
   password String
 
+  subscription Subscription?
+
   name String?
 
   createdAt DateTime @default(now())
 
   // Relations
   stores Store[]
+
+  // ✅ Operational abilities
+  shifts        Shift[]
+  transactions  Transaction[]
+  inventoryLogs InventoryLog[]
 }
 
 //
@@ -186,10 +193,21 @@ model Shift {
   startTime DateTime  @default(now())
   endTime   DateTime?
 
-  // Relations
-  employeeId String
-  employee   Employee @relation(fields: [employeeId], references: [id])
+  //
+  // EMPLOYEE SHIFT
+  //
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id])
 
+  //
+  // OWNER SHIFT
+  //
+  ownerId String?
+  owner   Owner?  @relation(fields: [ownerId], references: [id])
+
+  //
+  // STORE
+  //
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
 
@@ -199,7 +217,6 @@ model Shift {
 //
 // TRANSACTIONS
 //
-
 model Transaction {
   id String @id @default(uuid())
 
@@ -213,22 +230,42 @@ model Transaction {
 
   createdAt DateTime @default(now())
 
-  // Relations
-  employeeId String
-  employee   Employee @relation(fields: [employeeId], references: [id])
+  //
+  // EMPLOYEE TRANSACTION
+  //
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id])
 
+  //
+  // OWNER TRANSACTION
+  //
+  ownerId String?
+  owner   Owner?  @relation(fields: [ownerId], references: [id])
+
+  //
+  // STORE
+  //
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
 
+  //
+  // SHIFT
+  //
   shiftId String?
   shift   Shift?  @relation(fields: [shiftId], references: [id])
 
+  //
+  // REFUNDS
+  //
   refundedTransactionId String?
 
   refundedTransaction Transaction? @relation("RefundRelation", fields: [refundedTransactionId], references: [id])
 
   refunds Transaction[] @relation("RefundRelation")
 
+  //
+  // RELATIONS
+  //
   items         TransactionItem[]
   inventoryLogs InventoryLog[]
 }
@@ -263,16 +300,33 @@ model InventoryLog {
 
   createdAt DateTime @default(now())
 
-  // Relations
+  //
+  // PRODUCT
+  //
   productId String
   product   Product @relation(fields: [productId], references: [id])
 
+  //
+  // STORE
+  //
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
 
+  //
+  // EMPLOYEE ACTION
+  //
   employeeId String?
   employee   Employee? @relation(fields: [employeeId], references: [id])
 
+  //
+  // OWNER ACTION
+  //
+  ownerId String?
+  owner   Owner?  @relation(fields: [ownerId], references: [id])
+
+  //
+  // TRANSACTION
+  //
   transactionId String?
   transaction   Transaction? @relation(fields: [transactionId], references: [id])
 }
@@ -291,4 +345,34 @@ model PurchaseOrder {
   // Relations
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
+}
+
+//
+// SUBSCRIPTIONS
+//
+
+model Subscription {
+  id String @id @default(uuid())
+
+  ownerId String @unique
+  owner   Owner  @relation(fields: [ownerId], references: [id])
+
+  tier String
+  // starter
+  // growth
+  // enterprise
+
+  billingCycle String
+  // monthly
+  // annual
+
+  maxStores Int
+
+  pricePerStore Float
+
+  trialEndsAt DateTime?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
 }
