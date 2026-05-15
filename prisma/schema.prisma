@@ -1,13 +1,246 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+//
+// USERS
+//
+
+model User {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  password String
+  role     String
+  name     String?
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  stores        Store[]
+  shifts        Shift[]
+  transactions  Transaction[]
+  inventoryLogs InventoryLog[]
+}
+
+//
+// STORES
+//
+
+model Store {
+  id   String @id @default(uuid())
+  name String
+
+  inventoryMode String @default("hybrid")
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id])
+
+  products       Product[]
+  productGroups  ProductGroup[]
+  shifts         Shift[]
+  transactions   Transaction[]
+  inventoryLogs  InventoryLog[]
+  purchaseOrders PurchaseOrder[]
+}
+
+//
+// PRODUCT GROUPS
+//
+
+model ProductGroup {
+  id   String @id @default(uuid())
+  name String
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  products Product[]
+
+  @@unique([name, storeId])
+}
+
+//
+// PRODUCTS
+//
+
+model Product {
+  id      String @id @default(uuid())
+  name    String
+  barcode String @unique
+
+  price Float
+  stock Int   @default(0)
+
+  costPrice Float?
+
+  caseCost     Float?
+  caseRebate   Float?
+  unitsPerCase Int?
+
+  department String?
+  category   String?
+  nacsCode   String?
+
+  saleType String?
+  size     String?
+
+  caseBarcode String?
+
+  minAge Int?
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  groupId String?
+  group   ProductGroup? @relation(fields: [groupId], references: [id])
+
+  taxId String?
+  tax   Tax?    @relation(fields: [taxId], references: [id])
+
+  transactionItems TransactionItem[]
+  inventoryLogs    InventoryLog[]
+}
+
+//
+// TAXES
+//
+
+model Tax {
+  id String @id @default(uuid())
+
+  name String
+  rate Float
+
+  products Product[]
+}
+
+//
+// SHIFTS
+//
+
+model Shift {
+  id String @id @default(uuid())
+
+  startTime DateTime  @default(now())
+  endTime   DateTime?
+
+  // Relations
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  transactions Transaction[]
+}
+
+//
+// TRANSACTIONS
+//
+
+model Transaction {
+  id String @id @default(uuid())
+
+  total    Float
+  subtotal Float?
+  tax      Float?
+
+  paymentMethod String?
+
+  isRefund Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  shiftId String?
+  shift   Shift?  @relation(fields: [shiftId], references: [id])
+
+  refundedTransactionId String?
+
+  refundedTransaction Transaction? @relation("RefundRelation", fields: [refundedTransactionId], references: [id])
+
+  refunds Transaction[] @relation("RefundRelation")
+
+  items         TransactionItem[]
+  inventoryLogs InventoryLog[]
+}
+
+//
+// TRANSACTION ITEMS
+//
+
+model TransactionItem {
+  id String @id @default(uuid())
+
+  quantity Int
+  price    Float
+
+  // Relations
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+}
+
+//
+// INVENTORY LOGS
+//
+
+model InventoryLog {
+  id String @id @default(uuid())
+
+  change Int
+  reason String
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+}
+
+//
+// PURCHASE ORDERS
+//
+
+model PurchaseOrder {
+  id String @id @default(uuid())
+
+  status String @default("pending")
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
 }
