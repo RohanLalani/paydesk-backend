@@ -97,6 +97,7 @@ model Store {
 
   employeeStores EmployeeStore[]
 
+  departments    Department[]
   products       Product[]
   productGroups  ProductGroup[]
   shifts         Shift[]
@@ -125,6 +126,25 @@ model ProductGroup {
 }
 
 //
+// DEPARTMENTS 
+//
+
+model Department {
+  id String @id @default(uuid())
+
+  name String
+
+  createdAt DateTime @default(now())
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  products Product[]
+
+  @@unique([storeId, name])
+}
+
+//
 // PRODUCTS
 //
 
@@ -140,12 +160,14 @@ model Product {
   costPrice Float?
 
   caseCost     Float?
+  casePrice    Float?
   caseRebate   Float?
   unitsPerCase Int?
 
-  department String?
-  category   String?
-  nacsCode   String?
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+  category     String?
+  nacsCode     String?
 
   saleType String?
   size     String?
