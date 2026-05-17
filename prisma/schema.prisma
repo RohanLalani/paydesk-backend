@@ -157,10 +157,8 @@ model Product {
   price Float
   stock Int   @default(0)
 
-  costPrice Float?
-
+  costPrice    Float?
   caseCost     Float?
-  casePrice    Float?
   caseRebate   Float?
   unitsPerCase Int?
 
@@ -190,6 +188,32 @@ model Product {
 
   transactionItems TransactionItem[]
   inventoryLogs    InventoryLog[]
+
+  multiPacks ProductMultiPack[]
+}
+
+//
+// PRODUCT MULTI PACKS
+//
+model ProductMultiPack {
+  id String @id @default(uuid())
+
+  //
+  // PACK INFO
+  //
+  quantity Int
+
+  price Float
+
+  createdAt DateTime @default(now())
+
+  //
+  // PRODUCT
+  //
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  @@unique([productId, quantity])
 }
 
 //

@@ -37,37 +37,37 @@ export class ProductController {
     );
   }
 
-//
-// CREATE DEPARTMENT
-//
-@UseGuards(JwtGuard)
-@Post('department/create')
-createDepartment(
-  @Req() req: any,
-  @Body() body: any,
-) {
+  //
+  // CREATE DEPARTMENT
+  //
+  @UseGuards(JwtGuard)
+  @Post('department/create')
+  createDepartment(
+    @Req() req: any,
+    @Body() body: any,
+  ) {
 
-  return this.productService.createDepartment(
-    req.user.ownerId,
-    body,
-  );
-}
+    return this.productService.createDepartment(
+      req.user.ownerId,
+      body,
+    );
+  }
 
-//
-// GET DEPARTMENTS
-//
-@UseGuards(JwtGuard)
-@Get('department/list')
-getDepartments(
-  @Req() req: any,
-  @Query('storeId') storeId: string,
-) {
+  //
+  // GET DEPARTMENTS
+  //
+  @UseGuards(JwtGuard)
+  @Get('department/list')
+  getDepartments(
+    @Req() req: any,
+    @Query('storeId') storeId: string,
+  ) {
 
-  return this.productService.getDepartments(
-    req.user.ownerId,
-    storeId,
-  );
-}
+    return this.productService.getDepartments(
+      req.user.ownerId,
+      storeId,
+    );
+  }
 
   //
   // CREATE TAX
@@ -96,6 +96,22 @@ getDepartments(
   ) {
 
     return this.productService.createProduct(
+      req.user.ownerId,
+      body,
+    );
+  }
+
+  //
+  // CREATE MULTI PACK
+  //
+  @UseGuards(JwtGuard)
+  @Post('multipack/create')
+  createMultiPack(
+    @Req() req: any,
+    @Body() body: any,
+  ) {
+
+    return this.productService.createMultiPack(
       req.user.ownerId,
       body,
     );
@@ -149,35 +165,73 @@ getDepartments(
     );
   }
 
-//
-// RECEIVE CASE INVENTORY
-//
-@UseGuards(JwtGuard)
-@Post('inventory/receive-case')
-receiveCaseInventory(
-  @Req() req: any,
-  @Body() body: any,
-) {
+  //
+  // RECEIVE CASE INVENTORY
+  //
+  @UseGuards(JwtGuard)
+  @Post('inventory/receive-case')
+  receiveCaseInventory(
+    @Req() req: any,
+    @Body() body: any,
+  ) {
 
-  return this.productService.receiveCaseInventory(
-    req.user,
-    body,
-  );
-}
+    return this.productService.receiveCaseInventory(
+      req.user,
+      body,
+    );
+  }
 
-//
-// CASE BREAKDOWN
-//
-@UseGuards(JwtGuard)
-@Get('inventory/case-breakdown/:productId')
-getCaseBreakdown(
-  @Param('productId')
-  productId: string,
-) {
+  //
+  // CASE BREAKDOWN
+  //
+  @UseGuards(JwtGuard)
+  @Get('inventory/case-breakdown/:productId')
+  getCaseBreakdown(
+    @Param('productId')
+    productId: string,
+  ) {
 
-  return this.productService.getCaseBreakdown(
-    productId,
-  );
-}
+    return this.productService.getCaseBreakdown(
+      productId,
+    );
+  }
 
+  //
+  // PROCESS INVENTORY SALE
+  //
+  @UseGuards(JwtGuard)
+  @Post('inventory/sell')
+  processInventorySale(
+    @Req() req: any,
+    @Body() body: any,
+  ) {
+
+    return this.productService.processInventorySale(
+      req.user,
+      body,
+    );
+  }
+
+  //
+  // VALIDATE CART
+  //
+  @UseGuards(JwtGuard)
+  @Post('cart/validate')
+  validateCart(
+    @Body()
+    body: {
+      storeId: string;
+
+      items: {
+        productId: string;
+        quantity: number;
+      }[];
+    },
+  ) {
+
+    return this.productService.validateCart(
+      body.storeId,
+      body.items,
+    );
+  }
 }
