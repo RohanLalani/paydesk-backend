@@ -6,3 +6,153 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+enum StaffRole {
+  owner
+  partner
+  manager
+  employee
+}
+
+model Staff {
+  id    String    @id @default(uuid())
+  email String    @unique
+  name  String?
+  role  StaffRole
+
+  owner    Owner?
+  partner  Partner?
+  manager  Manager?
+  employee Employee?
+
+  storeStaff StoreStaff[]
+}
+
+model Owner {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  password String
+  name     String?
+
+  createdAt DateTime @default(now())
+
+  staffId String @unique
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  stores Store[]
+
+  subscriptions Subscription[]
+}
+
+model Partner {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  password String
+  name     String?
+
+  createdAt DateTime @default(now())
+
+  staffId String @unique
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  storeStaff StoreStaff[]
+}
+
+model Manager {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  password String
+  name     String?
+
+  permissions Json?
+
+  createdAt DateTime @default(now())
+
+  staffId String @unique
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  storeStaff StoreStaff[]
+}
+
+model Employee {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  password String
+  name     String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  staffId String @unique
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  storeStaff StoreStaff[]
+}
+
+model Store {
+  id      String  @id @default(uuid())
+  name    String
+  address String?
+
+  createdAt DateTime @default(now())
+
+  ownerId String
+  owner   Owner  @relation(fields: [ownerId], references: [id])
+
+  staff    StoreStaff[]
+  products Product[]
+}
+
+model StoreStaff {
+  id String @id @default(uuid())
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id])
+
+  role StaffRole
+
+  partnerId String?
+  partner   Partner? @relation(fields: [partnerId], references: [id])
+
+  managerId String?
+  manager   Manager? @relation(fields: [managerId], references: [id])
+
+  employeeId String?
+  employee   Employee? @relation(fields: [employeeId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([storeId, staffId])
+}
+
+model Subscription {
+  id String @id @default(uuid())
+
+  status        String    @default("trial")
+  billingCycle  String?
+  pricePerStore Float?
+  trialEndsAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  ownerId String
+  owner   Owner  @relation(fields: [ownerId], references: [id])
+}
+
+model Product {
+  id      String @id @default(uuid())
+  name    String
+  barcode String @unique
+  price   Float
+
+  stock Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+}
