@@ -15,10 +15,11 @@ enum StaffRole {
 }
 
 model Staff {
-  id    String    @id @default(uuid())
-  email String    @unique
-  name  String?
-  role  StaffRole
+  id              String    @id @default(uuid())
+  email           String    @unique
+  name            String?
+  role            StaffRole
+  emailVerifiedAt DateTime?
 
   owner    Owner?
   partner  Partner?
@@ -26,6 +27,38 @@ model Staff {
   employee Employee?
 
   storeStaff StoreStaff[]
+  passwordResetTokens PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  type      StaffRole
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  staffId String
+  staff   Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId, type])
+  @@index([expiresAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique
+  type      StaffRole
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  staffId String
+  staff   Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId, type])
+  @@index([expiresAt])
 }
 
 model Owner {
