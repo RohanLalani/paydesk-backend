@@ -14,6 +14,13 @@ enum StaffRole {
   employee
 }
 
+enum CustomerTierDiscountModel {
+  ORDER_PERCENTAGE
+  ORDER_FLAT_RATE
+  ITEM_PERCENTAGE
+  ITEM_FLAT_RATE
+}
+
 model Staff {
   id              String    @id @default(uuid())
   email           String    @unique
@@ -26,8 +33,8 @@ model Staff {
   manager  Manager?
   employee Employee?
 
-  storeStaff StoreStaff[]
-  passwordResetTokens PasswordResetToken[]
+  storeStaff              StoreStaff[]
+  passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
 }
 
@@ -40,7 +47,7 @@ model PasswordResetToken {
   createdAt DateTime  @default(now())
 
   staffId String
-  staff   Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   @@index([staffId, type])
   @@index([expiresAt])
@@ -55,7 +62,7 @@ model EmailVerificationToken {
   createdAt DateTime  @default(now())
 
   staffId String
-  staff   Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
   @@index([staffId, type])
   @@index([expiresAt])
@@ -74,7 +81,9 @@ model Owner {
 
   stores Store[]
 
-  subscriptions Subscription[]
+  subscriptions     Subscription[]
+  customerTiers     CustomerTier[]
+  customerTierRules CustomerTierRule[]
 }
 
 model Partner {
@@ -133,8 +142,12 @@ model Store {
   ownerId String
   owner   Owner  @relation(fields: [ownerId], references: [id])
 
-  staff    StoreStaff[]
-  products Product[]
+  staff                   StoreStaff[]
+  products                Product[]
+  customers               CustomerStore[]
+  customerTiers           CustomerTier[]
+  customerTierRules       CustomerTierRule[]
+  customerPurchaseHistory CustomerPurchaseHistory[]
 }
 
 model StoreStaff {
@@ -188,4 +201,108 @@ model Product {
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
+}
+
+model Customer {
+  id             String   @id @default(uuid())
+  customerNumber String   @unique
+  email          String?
+  firstName      String
+  lastName       String
+  phone          String   @unique
+  rewardPoints   Int      @default(0)
+  tier           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  stores    CustomerStore[]
+  purchases CustomerPurchaseHistory[]
+}
+
+model CustomerStore {
+  id        String   @id @default(uuid())
+  tier      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  currentTierRuleId String?
+  currentTierRule   CustomerTierRule? @relation(fields: [currentTierRuleId], references: [id], onDelete: SetNull)
+
+  currentTierId String?
+  currentTier   CustomerTier? @relation(fields: [currentTierId], references: [id], onDelete: SetNull)
+
+  @@unique([customerId, storeId])
+  @@index([storeId])
+}
+
+model CustomerTier {
+  id            String                    @id @default(uuid())
+  name          String
+  discountModel CustomerTierDiscountModel
+  discountValue Decimal                   @db.Decimal(12, 2)
+  isActive      Boolean                   @default(true)
+  createdAt     DateTime                  @default(now())
+  updatedAt     DateTime                  @updatedAt
+
+  ownerId String
+  owner   Owner  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  customerStores CustomerStore[]
+  tierRules      CustomerTierRule[]
+
+  @@unique([storeId, name])
+  @@index([ownerId])
+  @@index([storeId])
+}
+
+model CustomerTierRule {
+  id                    String   @id @default(uuid())
+  name                  String
+  minimumSpend          Decimal  @db.Decimal(12, 2)
+  syncAcrossOwnerStores Boolean  @default(false)
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  ownerId String
+  owner   Owner  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  tierId String?
+  tier   CustomerTier? @relation(fields: [tierId], references: [id], onDelete: SetNull)
+
+  customerStores CustomerStore[]
+
+  @@index([ownerId, syncAcrossOwnerStores])
+  @@index([storeId])
+  @@index([tierId])
+}
+
+model CustomerPurchaseHistory {
+  id            String   @id @default(uuid())
+  transactionId String?
+  totalSpend    Decimal  @db.Decimal(12, 2)
+  purchasedAt   DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, purchasedAt])
+  @@index([storeId, purchasedAt])
+  @@index([transactionId])
 }
