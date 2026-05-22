@@ -14,6 +14,32 @@ enum StaffRole {
   employee
 }
 
+enum SubscriptionStatus {
+  trial
+  active
+  inactive
+  cancelled
+}
+
+enum BillingCycle {
+  monthly
+  annual
+}
+
+enum ProductSaleType {
+  piece
+  weight
+  meat_barcode
+  service
+  lottery
+  other
+}
+
+enum TaxStyle {
+  pre_discount
+  post_discount
+}
+
 enum CustomerTierDiscountModel {
   ORDER_PERCENTAGE
   ORDER_FLAT_RATE
@@ -75,6 +101,7 @@ model Owner {
   name     String?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   staffId String @unique
   staff   Staff  @relation(fields: [staffId], references: [id])
@@ -93,6 +120,7 @@ model Partner {
   name     String?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   staffId String @unique
   staff   Staff  @relation(fields: [staffId], references: [id])
@@ -109,6 +137,7 @@ model Manager {
   permissions Json?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   staffId String @unique
   staff   Staff  @relation(fields: [staffId], references: [id])
@@ -125,6 +154,7 @@ model Employee {
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   staffId String @unique
   staff   Staff  @relation(fields: [staffId], references: [id])
@@ -137,17 +167,25 @@ model Store {
   name    String
   address String?
 
+  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   ownerId String
   owner   Owner  @relation(fields: [ownerId], references: [id])
 
   staff                   StoreStaff[]
   products                Product[]
+  departments             Department[]
+  priceGroups             PriceGroup[]
+  productCategories       ProductCategory[]
+  taxes                   Tax[]
   customers               CustomerStore[]
   customerTiers           CustomerTier[]
   customerTierRules       CustomerTierRule[]
   customerPurchaseHistory CustomerPurchaseHistory[]
+
+  @@index([ownerId, isActive])
 }
 
 model StoreStaff {
@@ -178,29 +216,143 @@ model StoreStaff {
 model Subscription {
   id String @id @default(uuid())
 
-  status        String    @default("trial")
-  billingCycle  String?
-  pricePerStore Float?
-  trialEndsAt   DateTime?
+  status              SubscriptionStatus @default(trial)
+  billingCycle        BillingCycle
+  trialEndsAt         DateTime?
+  currentPeriodEndsAt DateTime?
+  maxStores           Int?
+  pricePerStore       Float
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   ownerId String
   owner   Owner  @relation(fields: [ownerId], references: [id])
+
+  @@index([ownerId, status])
 }
 
 model Product {
-  id      String @id @default(uuid())
-  name    String
-  barcode String @unique
-  price   Float
-
-  stock Int @default(0)
-
-  createdAt DateTime @default(now())
+  id                             String          @id @default(uuid())
+  barcode                        String          @unique
+  name                           String
+  saleType                       ProductSaleType
+  currentQuantity                Int             @default(0)
+  unitsPerCase                   Int?
+  caseCost                       Float?
+  caseDiscount                   Float           @default(0)
+  discountPerUnit                Float?
+  caseRebate                     Float           @default(0)
+  rebatePerUnit                  Float?
+  unitCost                       Float?
+  unitCostAfterDiscountAndRebate Float?
+  unitRetail                     Float
+  onlineRetailPrice              Float?
+  unitOfMeasure                  String?
+  size                           String?
+  margin                         Float?
+  defaultMargin                  Float?
+  maxInventory                   Int?
+  minInventory                   Int?
+  minimumAge                     Int?
+  nacsCode                       String?
+  nacsCategory                   String?
+  nacsSubCategory                String?
+  blueLaw                        Boolean         @default(false)
+  linkedItems                    Json?
+  kitchenPrint                   Boolean         @default(false)
+  allowEbt                       Boolean
+  trackInventory                 Boolean         @default(true)
+  taxStyle                       TaxStyle
+  isActive                       Boolean         @default(true)
+  createdAt                      DateTime        @default(now())
+  updatedAt                      DateTime        @updatedAt
 
   storeId String
-  store   Store  @relation(fields: [storeId], references: [id])
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id])
+
+  priceGroupId String
+  priceGroup   PriceGroup @relation(fields: [priceGroupId], references: [id])
+
+  productCategoryId String
+  productCategory   ProductCategory @relation(fields: [productCategoryId], references: [id])
+
+  taxId String
+  tax   Tax    @relation(fields: [taxId], references: [id])
+
+  @@index([storeId, isActive])
+  @@index([departmentId])
+  @@index([priceGroupId])
+  @@index([productCategoryId])
+  @@index([taxId])
+}
+
+model Department {
+  id              String   @id @default(uuid())
+  name            String
+  defaultAllowEbt Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  products Product[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+model PriceGroup {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  products Product[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+model ProductCategory {
+  id          String   @id @default(uuid())
+  name        String
+  brand       String?
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  products Product[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
+}
+
+model Tax {
+  id        String   @id @default(uuid())
+  name      String
+  rate      Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  products Product[]
+
+  @@unique([storeId, name])
+  @@index([storeId])
 }
 
 model Customer {
