@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -12,6 +13,7 @@ import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma.service';
 import { EmailService } from './email/email.service';
+import { AuthTokenPayload } from './strategies/jwt.strategy';
 
 @Injectable()
 export class AuthService {
@@ -106,16 +108,30 @@ export class AuthService {
       };
     }
 
-    const account = await this.updateAccount(type, id, existing.staffId, updates);
+    let account = await this.updateAccount(type, id, existing.staffId, updates);
 
     if (updates.email !== undefined) {
       await this.createAndSendEmailVerification(type, account);
+      account = (await this.findAccountById(type, id)) ?? account;
     }
 
     return {
       message: `${this.label(type)} updated successfully`,
       account: this.toSafeAccount(type, account),
     };
+  }
+
+  async updateAuthenticated(
+    type: AccountType,
+    id: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    if (user.type !== type || user.accountId !== id) {
+      throw new ForbiddenException('You can only update your own account');
+    }
+
+    return this.update(type, id, body);
   }
 
   async forgotPassword(type: AccountType, body: Record<string, unknown>) {

@@ -1,7 +1,19 @@
-import { Body, Controller, Param, Patch, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Param,
+  Patch,
+  Post,
+  Request,
+  UseGuards,
+} from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
+import { JwtAuthGuard } from './guards/jwt.guard';
+import { AuthTokenPayload } from './strategies/jwt.strategy';
 
 @Controller('auth')
+@Throttle({ default: { ttl: 60_000, limit: 20 } })
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
@@ -46,23 +58,58 @@ export class AuthController {
   }
 
   @Patch('owner/:id')
-  updateOwner(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.authService.update('owner', id, body);
+  @UseGuards(JwtAuthGuard)
+  updateOwner(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.authService.updateAuthenticated('owner', id, body, request.user);
   }
 
   @Patch('partner/:id')
-  updatePartner(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.authService.update('partner', id, body);
+  @UseGuards(JwtAuthGuard)
+  updatePartner(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.authService.updateAuthenticated(
+      'partner',
+      id,
+      body,
+      request.user,
+    );
   }
 
   @Patch('manager/:id')
-  updateManager(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.authService.update('manager', id, body);
+  @UseGuards(JwtAuthGuard)
+  updateManager(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.authService.updateAuthenticated(
+      'manager',
+      id,
+      body,
+      request.user,
+    );
   }
 
   @Patch('employee/:id')
-  updateEmployee(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.authService.update('employee', id, body);
+  @UseGuards(JwtAuthGuard)
+  updateEmployee(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.authService.updateAuthenticated(
+      'employee',
+      id,
+      body,
+      request.user,
+    );
   }
 
   @Post('forgot-password/owner')
