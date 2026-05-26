@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await */
 import {
   ConflictException,
   ForbiddenException,
@@ -439,8 +440,8 @@ describe('CustomerService', () => {
     expect(result.tier).toBe('Gold');
   });
 
-  it('exposes a weekly tier recalculation placeholder', async () => {
-    await expect(service.recalculateWeeklyCustomerTiers()).resolves.toEqual({
+  it('exposes a weekly tier recalculation placeholder', () => {
+    expect(service.recalculateWeeklyCustomerTiers()).toEqual({
       message:
         'Weekly customer tier recalculation placeholder. Wire this method to a scheduler when automation is added.',
     });

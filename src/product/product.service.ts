@@ -582,5 +582,3 @@ type ProductCalculationInput = {
   caseRebate: number;
   unitRetail: number;
 };
-
-

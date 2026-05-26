@@ -21,6 +21,7 @@ export class AuthService {
   private readonly saltRounds = 10;
   private readonly resetTokenMinutes = 15;
   private readonly emailVerificationTokenHours = 24;
+  private readonly maxPasswordLength = 128;
   private readonly forgotPasswordMessage =
     'If an account with that email exists, a password reset link has been sent.';
 
@@ -51,6 +52,8 @@ export class AuthService {
   async login(type: AccountType, body: Record<string, unknown>) {
     const email = this.requiredString(body.email, 'email').toLowerCase();
     const password = this.requiredString(body.password, 'password');
+    this.validateEmail(email);
+    this.validatePasswordLength(password);
     const account = await this.findAccountByEmail(type, email);
 
     if (!account || !(await bcrypt.compare(password, account.password))) {
@@ -58,7 +61,9 @@ export class AuthService {
     }
 
     if (!account.staff?.emailVerifiedAt) {
-      throw new UnauthorizedException('Please verify your email before logging in');
+      throw new UnauthorizedException(
+        'Please verify your email before logging in',
+      );
     }
 
     const token = await this.jwtService.signAsync({
@@ -89,6 +94,7 @@ export class AuthService {
 
     if (body.email !== undefined) {
       updates.email = this.requiredString(body.email, 'email').toLowerCase();
+      this.validateEmail(updates.email);
       await this.ensureEmailAvailable(type, updates.email, {
         accountId: existing.id,
         staffId: existing.staffId,
@@ -136,6 +142,7 @@ export class AuthService {
 
   async forgotPassword(type: AccountType, body: Record<string, unknown>) {
     const email = this.requiredString(body.email, 'email').toLowerCase();
+    this.validateEmail(email);
     const account = await this.findAccountByEmail(type, email);
 
     if (!account) {
@@ -196,6 +203,7 @@ export class AuthService {
   async resetPassword(type: AccountType, body: Record<string, unknown>) {
     const token = this.requiredString(body.token, 'token');
     const password = this.requiredString(body.password, 'password');
+    this.validateToken(token, 'token');
     this.validatePassword(password);
 
     const tokenHash = this.hashToken(token);
@@ -231,7 +239,9 @@ export class AuthService {
       });
 
       if (!claimed.count) {
-        throw new BadRequestException('Invalid or expired password reset token');
+        throw new BadRequestException(
+          'Invalid or expired password reset token',
+        );
       }
 
       await this.updateAccountPassword(type, account.id, hashedPassword, tx);
@@ -249,6 +259,7 @@ export class AuthService {
 
   async verifyEmail(type: AccountType, body: Record<string, unknown>) {
     const token = this.requiredString(body.token, 'token');
+    this.validateToken(token, 'token');
     const tokenHash = this.hashToken(token);
     const verificationToken =
       await this.prisma.emailVerificationToken.findUnique({
@@ -261,7 +272,9 @@ export class AuthService {
       verificationToken.usedAt ||
       verificationToken.expiresAt <= new Date()
     ) {
-      throw new BadRequestException('Invalid or expired email verification token');
+      throw new BadRequestException(
+        'Invalid or expired email verification token',
+      );
     }
 
     const account = await this.findAccountByStaffId(
@@ -270,7 +283,9 @@ export class AuthService {
     );
 
     if (!account) {
-      throw new BadRequestException('Invalid or expired email verification token');
+      throw new BadRequestException(
+        'Invalid or expired email verification token',
+      );
     }
 
     const verifiedAt = new Date();
@@ -316,12 +331,15 @@ export class AuthService {
     const password = this.requiredString(body.password, 'password');
     const name = this.optionalString(body.name, 'name');
 
+    this.validateEmail(email);
     this.validatePassword(password);
 
     return { email, password, name };
   }
 
   private validatePassword(password: string) {
+    this.validatePasswordLength(password);
+
     const strongPassword =
       password.length >= 8 &&
       /[A-Z]/.test(password) &&
@@ -333,6 +351,27 @@ export class AuthService {
       throw new BadRequestException(
         'Password must be at least 8 characters and include uppercase, lowercase, number, and special character',
       );
+    }
+  }
+
+  private validatePasswordLength(password: string) {
+    if (password.length > this.maxPasswordLength) {
+      throw new BadRequestException('password is too long');
+    }
+  }
+
+  private validateEmail(email: string) {
+    const validEmail =
+      email.length <= 254 && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email);
+
+    if (!validEmail) {
+      throw new BadRequestException('email must be a valid email address');
+    }
+  }
+
+  private validateToken(token: string, field: string) {
+    if (!/^[a-f0-9]{64}$/i.test(token)) {
+      throw new BadRequestException(`${field} is invalid`);
     }
   }
 
@@ -624,7 +663,8 @@ export class AuthService {
   }
 
   private toSafeAccount(type: AccountType, account: AccountWithStaff) {
-    const { password, staff, ...safeAccount } = account;
+    const { staff, ...safeAccount } = account;
+    delete (safeAccount as Partial<AccountWithStaff>).password;
 
     return {
       ...safeAccount,

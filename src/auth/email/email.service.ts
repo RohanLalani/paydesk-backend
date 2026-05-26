@@ -71,7 +71,9 @@ export class EmailService {
     resetUrl: string;
     type: string;
   }) {
-    const greeting = params.name ? `Hi ${this.escapeHtml(params.name)},` : 'Hi,';
+    const greeting = params.name
+      ? `Hi ${this.escapeHtml(params.name)},`
+      : 'Hi,';
     const accountType = this.escapeHtml(params.type);
     const resetUrl = this.escapeHtml(params.resetUrl);
 
@@ -96,7 +98,9 @@ export class EmailService {
     verificationUrl: string;
     type: string;
   }) {
-    const greeting = params.name ? `Hi ${this.escapeHtml(params.name)},` : 'Hi,';
+    const greeting = params.name
+      ? `Hi ${this.escapeHtml(params.name)},`
+      : 'Hi,';
     const accountType = this.escapeHtml(params.type);
     const verificationUrl = this.escapeHtml(params.verificationUrl);
 

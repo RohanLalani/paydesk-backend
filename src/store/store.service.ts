@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import {
   BillingCycle,
@@ -20,28 +21,46 @@ export class StoreService {
     private readonly access: PosAccessService,
   ) {}
 
-  calculateStorePricing(storeCount: number, billingCycle: BillingCycle) {
-    if (storeCount < 1) {
-      throw new BadRequestException('storeCount must be at least 1');
+  calculateStorePricing(activeStoreCount: number, billingCycle: BillingCycle) {
+    if (activeStoreCount < 0) {
+      throw new BadRequestException('activeStoreCount cannot be negative');
     }
 
-    if (storeCount <= 2) {
-      return billingCycle === BillingCycle.annual ? 300 : 30;
-    }
+    const monthlyPricePerStore =
+      activeStoreCount === 0
+        ? 0
+        : this.getTierPrice(activeStoreCount, BillingCycle.monthly);
+    const annualPricePerStore =
+      activeStoreCount === 0
+        ? 0
+        : this.getTierPrice(activeStoreCount, BillingCycle.annual);
 
-    if (storeCount <= 10) {
-      return billingCycle === BillingCycle.annual ? 250 : 25;
-    }
-
-    return billingCycle === BillingCycle.annual ? 200 : 20;
+    return {
+      activeStoreCount,
+      pricePerStore:
+        billingCycle === BillingCycle.annual
+          ? annualPricePerStore
+          : monthlyPricePerStore,
+      totalMonthlyAmount: activeStoreCount * monthlyPricePerStore,
+      totalAnnualAmount: activeStoreCount * annualPricePerStore,
+    };
   }
 
-  async canCreateStore(ownerId: string) {
-    const subscription = await this.prisma.subscription.findFirst({
-      where: {
-        ownerId,
-        status: { in: [SubscriptionStatus.trial, SubscriptionStatus.active] },
-      },
+  getActiveStoreCount(
+    ownerId: string,
+    tx: Prisma.TransactionClient = this.prisma,
+  ) {
+    return tx.store.count({
+      where: { ownerId, isActive: true },
+    });
+  }
+
+  async canCreateStore(
+    ownerId: string,
+    tx: Prisma.TransactionClient = this.prisma,
+  ) {
+    const subscription = await tx.subscription.findFirst({
+      where: this.activeSubscriptionWhere(ownerId),
       orderBy: { createdAt: 'desc' },
     });
 
@@ -52,9 +71,7 @@ export class StoreService {
       };
     }
 
-    const activeStoreCount = await this.prisma.store.count({
-      where: { ownerId, isActive: true },
-    });
+    const activeStoreCount = await this.getActiveStoreCount(ownerId, tx);
 
     if (
       subscription.maxStores !== null &&
@@ -69,40 +86,91 @@ export class StoreService {
     return { allowed: true, subscription, activeStoreCount };
   }
 
+  async updateOwnerBilling(
+    ownerId: string,
+    tx: Prisma.TransactionClient = this.prisma,
+  ) {
+    const subscription = await tx.subscription.findFirst({
+      where: this.activeSubscriptionWhere(ownerId),
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!subscription) {
+      return null;
+    }
+
+    const activeStoreCount = await this.getActiveStoreCount(ownerId, tx);
+    const pricing = this.calculateStorePricing(
+      activeStoreCount,
+      subscription.billingCycle,
+    );
+
+    return tx.subscription.update({
+      where: { id: subscription.id },
+      data: pricing,
+    });
+  }
+
+  async assertCanManageStore(user: AuthTokenPayload, storeId: string) {
+    const store = await this.prisma.store.findFirst({
+      where: { id: storeId, isActive: true },
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    if (user.type === StaffRole.owner && user.accountId === store.ownerId) {
+      return store;
+    }
+
+    if (user.type !== StaffRole.partner) {
+      throw new ForbiddenException('You cannot manage store details');
+    }
+
+    const assignment = await this.prisma.storeStaff.findUnique({
+      where: {
+        storeId_staffId: {
+          storeId,
+          staffId: user.staffId,
+        },
+      },
+    });
+
+    if (assignment?.role === StaffRole.partner) {
+      return store;
+    }
+
+    throw new ForbiddenException('You cannot manage store details');
+  }
+
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {
     if (user.type !== StaffRole.owner) {
       throw new ForbiddenException('Only owners can create stores');
     }
 
     const dto = this.parseCreateBody(body);
-    const creationCheck = await this.canCreateStore(user.accountId);
 
-    if (!creationCheck.allowed || !creationCheck.subscription) {
-      throw new ForbiddenException(creationCheck.reason);
-    }
+    return this.prisma.$transaction(async (tx) => {
+      const creationCheck = await this.canCreateStore(user.accountId, tx);
 
-    const nextStoreCount = creationCheck.activeStoreCount + 1;
-    const pricePerStore = this.calculateStorePricing(
-      nextStoreCount,
-      creationCheck.subscription.billingCycle,
-    );
+      if (!creationCheck.allowed || !creationCheck.subscription) {
+        throw new ForbiddenException(creationCheck.reason);
+      }
 
-    const [store] = await this.prisma.$transaction([
-      this.prisma.store.create({
+      const store = await tx.store.create({
         data: {
           name: dto.name,
           address: dto.address,
           ownerId: user.accountId,
         },
         include: this.storeInclude,
-      }),
-      this.prisma.subscription.update({
-        where: { id: creationCheck.subscription.id },
-        data: { pricePerStore },
-      }),
-    ]);
+      });
 
-    return store;
+      await this.updateOwnerBilling(user.accountId, tx);
+
+      return store;
+    });
   }
 
   async update(
@@ -110,7 +178,7 @@ export class StoreService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    await this.access.ensureStoreAccess(storeId, user, 'update_store');
+    await this.assertCanManageStore(user, storeId);
     const updates = this.parseUpdateBody(body);
 
     return this.prisma.store.update({
@@ -131,10 +199,16 @@ export class StoreService {
       throw new ForbiddenException('Only the owner can delete a store');
     }
 
-    return this.prisma.store.update({
-      where: { id: storeId },
-      data: { isActive: false },
-      include: this.storeInclude,
+    return this.prisma.$transaction(async (tx) => {
+      const deletedStore = await tx.store.update({
+        where: { id: storeId },
+        data: { isActive: false },
+        include: this.storeInclude,
+      });
+
+      await this.updateOwnerBilling(store.ownerId, tx);
+
+      return deletedStore;
     });
   }
 
@@ -186,6 +260,12 @@ export class StoreService {
       updates.address = this.optionalString(body.address, 'address');
     }
 
+    if (!Object.keys(updates).length) {
+      throw new BadRequestException(
+        'At least one of name or address is required',
+      );
+    }
+
     return updates;
   }
 
@@ -207,6 +287,41 @@ export class StoreService {
     }
 
     return value.trim() || null;
+  }
+
+  private getTierPrice(activeStoreCount: number, billingCycle: BillingCycle) {
+    if (activeStoreCount <= 2) {
+      return billingCycle === BillingCycle.annual ? 300 : 30;
+    }
+
+    if (activeStoreCount <= 10) {
+      return billingCycle === BillingCycle.annual ? 250 : 25;
+    }
+
+    return billingCycle === BillingCycle.annual ? 200 : 20;
+  }
+
+  private activeSubscriptionWhere(
+    ownerId: string,
+  ): Prisma.SubscriptionWhereInput {
+    const now = new Date();
+
+    return {
+      ownerId,
+      OR: [
+        {
+          status: SubscriptionStatus.active,
+          OR: [
+            { currentPeriodEndsAt: null },
+            { currentPeriodEndsAt: { gt: now } },
+          ],
+        },
+        {
+          status: SubscriptionStatus.trial,
+          OR: [{ trialEndsAt: null }, { trialEndsAt: { gt: now } }],
+        },
+      ],
+    };
   }
 
   private readonly storeInclude = {

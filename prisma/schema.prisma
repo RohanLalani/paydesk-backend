@@ -221,7 +221,10 @@ model Subscription {
   trialEndsAt         DateTime?
   currentPeriodEndsAt DateTime?
   maxStores           Int?
-  pricePerStore       Float
+  activeStoreCount    Int                @default(0)
+  pricePerStore       Float              @default(0)
+  totalMonthlyAmount  Float              @default(0)
+  totalAnnualAmount   Float              @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

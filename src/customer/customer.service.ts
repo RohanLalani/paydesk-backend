@@ -293,7 +293,7 @@ export class CustomerService {
     return this.toCustomerResponse(updated, accessibleStoreIds);
   }
 
-  async recalculateWeeklyCustomerTiers() {
+  recalculateWeeklyCustomerTiers() {
     return {
       message:
         'Weekly customer tier recalculation placeholder. Wire this method to a scheduler when automation is added.',
@@ -453,7 +453,7 @@ export class CustomerService {
       where: { id: this.requiredString(storeId, 'storeId') },
     });
 
-    if (!store) {
+    if (!store || store.isActive === false) {
       throw new NotFoundException('Store not found');
     }
 
@@ -465,9 +465,13 @@ export class CustomerService {
   }
 
   private async canAccessStore(
-    store: { id: string; ownerId: string },
+    store: { id: string; ownerId: string; isActive?: boolean },
     user: AuthTokenPayload,
   ) {
+    if (store.isActive === false) {
+      return false;
+    }
+
     if (user.type === StaffRole.owner && user.accountId === store.ownerId) {
       return true;
     }
