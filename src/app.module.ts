@@ -6,12 +6,8 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { CustomerModule } from './customer/customer.module';
-import { DepartmentModule } from './department/department.module';
-import { PriceGroupModule } from './priceGroups/price-groups.module';
 import { ProductModule } from './product/product.module';
-import { ProductCategoryModule } from './productCategory/product-category.module';
 import { StoreModule } from './store/store.module';
-import { TaxModule } from './tax/tax.module';
 
 @Module({
   imports: [
@@ -28,10 +24,6 @@ import { TaxModule } from './tax/tax.module';
     CustomerModule,
     StoreModule,
     ProductModule,
-    DepartmentModule,
-    PriceGroupModule,
-    ProductCategoryModule,
-    TaxModule,
   ],
   controllers: [AppController],
   providers: [

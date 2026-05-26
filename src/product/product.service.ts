@@ -16,6 +16,303 @@ export class ProductService {
     private readonly access: PosAccessService,
   ) {}
 
+  async createDepartment(body: Record<string, unknown>, user: AuthTokenPayload) {
+    const dto = {
+      storeId: this.requiredString(body.storeId, 'storeId'),
+      name: this.requiredString(body.name, 'name'),
+      defaultAllowEbt:
+        this.optionalBoolean(body.defaultAllowEbt, 'defaultAllowEbt', false) ??
+        false,
+    };
+    await this.access.ensureStoreAccess(
+      dto.storeId,
+      user,
+      'manage_departments',
+    );
+
+    try {
+      return await this.prisma.department.create({ data: dto });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'department');
+      throw error;
+    }
+  }
+
+  async listDepartments(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_departments');
+
+    return this.prisma.department.findMany({
+      where: { storeId },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async updateDepartment(
+    id: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const department = await this.findDepartmentOrThrow(id);
+    await this.access.ensureStoreAccess(
+      department.storeId,
+      user,
+      'manage_departments',
+    );
+    const data: Prisma.DepartmentUpdateInput = {};
+
+    if (body.name !== undefined) {
+      data.name = this.requiredString(body.name, 'name');
+    }
+
+    if (body.defaultAllowEbt !== undefined) {
+      data.defaultAllowEbt = this.requiredBoolean(
+        body.defaultAllowEbt,
+        'defaultAllowEbt',
+      );
+    }
+
+    try {
+      return await this.prisma.department.update({ where: { id }, data });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'department');
+      throw error;
+    }
+  }
+
+  async deleteDepartment(id: string, user: AuthTokenPayload) {
+    const department = await this.findDepartmentOrThrow(id);
+    await this.access.ensureStoreAccess(
+      department.storeId,
+      user,
+      'manage_departments',
+    );
+    await this.ensureSetupTableNotInUse(
+      { departmentId: id },
+      'Department is used by products and cannot be deleted',
+    );
+
+    return this.prisma.department.delete({ where: { id } });
+  }
+
+  async createPriceGroup(body: Record<string, unknown>, user: AuthTokenPayload) {
+    const dto = {
+      storeId: this.requiredString(body.storeId, 'storeId'),
+      name: this.requiredString(body.name, 'name'),
+      description: this.optionalString(body.description, 'description'),
+    };
+    await this.access.ensureStoreAccess(
+      dto.storeId,
+      user,
+      'manage_price_groups',
+    );
+
+    try {
+      return await this.prisma.priceGroup.create({ data: dto });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'price group');
+      throw error;
+    }
+  }
+
+  async listPriceGroups(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_price_groups');
+
+    return this.prisma.priceGroup.findMany({
+      where: { storeId },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async updatePriceGroup(
+    id: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const priceGroup = await this.findPriceGroupOrThrow(id);
+    await this.access.ensureStoreAccess(
+      priceGroup.storeId,
+      user,
+      'manage_price_groups',
+    );
+    const data: Prisma.PriceGroupUpdateInput = {};
+
+    if (body.name !== undefined) {
+      data.name = this.requiredString(body.name, 'name');
+    }
+
+    if (body.description !== undefined) {
+      data.description = this.optionalString(body.description, 'description');
+    }
+
+    try {
+      return await this.prisma.priceGroup.update({ where: { id }, data });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'price group');
+      throw error;
+    }
+  }
+
+  async deletePriceGroup(id: string, user: AuthTokenPayload) {
+    const priceGroup = await this.findPriceGroupOrThrow(id);
+    await this.access.ensureStoreAccess(
+      priceGroup.storeId,
+      user,
+      'manage_price_groups',
+    );
+    await this.ensureSetupTableNotInUse(
+      { priceGroupId: id },
+      'Price group is used by products and cannot be deleted',
+    );
+
+    return this.prisma.priceGroup.delete({ where: { id } });
+  }
+
+  async createProductCategory(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const dto = {
+      storeId: this.requiredString(body.storeId, 'storeId'),
+      name: this.requiredString(body.name, 'name'),
+      brand: this.optionalString(body.brand, 'brand'),
+      description: this.optionalString(body.description, 'description'),
+    };
+    await this.access.ensureStoreAccess(
+      dto.storeId,
+      user,
+      'manage_product_categories',
+    );
+
+    try {
+      return await this.prisma.productCategory.create({ data: dto });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'product category');
+      throw error;
+    }
+  }
+
+  async listProductCategories(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(
+      storeId,
+      user,
+      'manage_product_categories',
+    );
+
+    return this.prisma.productCategory.findMany({
+      where: { storeId },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async updateProductCategory(
+    id: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const productCategory = await this.findProductCategoryOrThrow(id);
+    await this.access.ensureStoreAccess(
+      productCategory.storeId,
+      user,
+      'manage_product_categories',
+    );
+    const data: Prisma.ProductCategoryUpdateInput = {};
+
+    if (body.name !== undefined) {
+      data.name = this.requiredString(body.name, 'name');
+    }
+
+    if (body.brand !== undefined) {
+      data.brand = this.optionalString(body.brand, 'brand');
+    }
+
+    if (body.description !== undefined) {
+      data.description = this.optionalString(body.description, 'description');
+    }
+
+    try {
+      return await this.prisma.productCategory.update({ where: { id }, data });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'product category');
+      throw error;
+    }
+  }
+
+  async deleteProductCategory(id: string, user: AuthTokenPayload) {
+    const productCategory = await this.findProductCategoryOrThrow(id);
+    await this.access.ensureStoreAccess(
+      productCategory.storeId,
+      user,
+      'manage_product_categories',
+    );
+    await this.ensureSetupTableNotInUse(
+      { productCategoryId: id },
+      'Product category is used by products and cannot be deleted',
+    );
+
+    return this.prisma.productCategory.delete({ where: { id } });
+  }
+
+  async createTax(body: Record<string, unknown>, user: AuthTokenPayload) {
+    const dto = {
+      storeId: this.requiredString(body.storeId, 'storeId'),
+      name: this.requiredString(body.name, 'name'),
+      rate: this.requiredNumber(body.rate, 'rate'),
+    };
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_taxes');
+
+    try {
+      return await this.prisma.tax.create({ data: dto });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'tax');
+      throw error;
+    }
+  }
+
+  async listTaxes(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_taxes');
+
+    return this.prisma.tax.findMany({
+      where: { storeId },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async updateTax(
+    id: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const tax = await this.findTaxOrThrow(id);
+    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_taxes');
+    const data: Prisma.TaxUpdateInput = {};
+
+    if (body.name !== undefined) {
+      data.name = this.requiredString(body.name, 'name');
+    }
+
+    if (body.rate !== undefined) {
+      data.rate = this.requiredNumber(body.rate, 'rate');
+    }
+
+    try {
+      return await this.prisma.tax.update({ where: { id }, data });
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'tax');
+      throw error;
+    }
+  }
+
+  async deleteTax(id: string, user: AuthTokenPayload) {
+    const tax = await this.findTaxOrThrow(id);
+    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_taxes');
+    await this.ensureSetupTableNotInUse(
+      { taxId: id },
+      'Tax is used by products and cannot be deleted',
+    );
+
+    return this.prisma.tax.delete({ where: { id } });
+  }
+
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {
     const dto = this.parseCreateBody(body);
     await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
@@ -147,6 +444,65 @@ export class ProductService {
       data: { isActive: false },
       include: this.productInclude,
     });
+  }
+
+  private async findDepartmentOrThrow(id: string) {
+    const department = await this.prisma.department.findUnique({
+      where: { id },
+    });
+
+    if (!department) {
+      throw new NotFoundException('Department not found');
+    }
+
+    return department;
+  }
+
+  private async findPriceGroupOrThrow(id: string) {
+    const priceGroup = await this.prisma.priceGroup.findUnique({
+      where: { id },
+    });
+
+    if (!priceGroup) {
+      throw new NotFoundException('Price group not found');
+    }
+
+    return priceGroup;
+  }
+
+  private async findProductCategoryOrThrow(id: string) {
+    const productCategory = await this.prisma.productCategory.findUnique({
+      where: { id },
+    });
+
+    if (!productCategory) {
+      throw new NotFoundException('Product category not found');
+    }
+
+    return productCategory;
+  }
+
+  private async findTaxOrThrow(id: string) {
+    const tax = await this.prisma.tax.findUnique({
+      where: { id },
+    });
+
+    if (!tax) {
+      throw new NotFoundException('Tax not found');
+    }
+
+    return tax;
+  }
+
+  private async ensureSetupTableNotInUse(
+    where: Prisma.ProductWhereInput,
+    message: string,
+  ) {
+    const productCount = await this.prisma.product.count({ where });
+
+    if (productCount > 0) {
+      throw new BadRequestException(message);
+    }
   }
 
   private async findActiveProductOrThrow(productId: string) {
@@ -491,6 +847,10 @@ export class ProductService {
       return fallback ?? undefined;
     }
 
+    return this.requiredBoolean(value, field);
+  }
+
+  private requiredBoolean(value: unknown, field: string) {
     if (typeof value !== 'boolean') {
       throw new BadRequestException(`${field} must be a boolean`);
     }
@@ -533,6 +893,17 @@ export class ProductService {
       error.code === 'P2002'
     ) {
       throw new ConflictException('A product with that barcode already exists');
+    }
+  }
+
+  private handleSetupNameConflict(error: unknown, label: string) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      throw new ConflictException(
+        `A ${label} with that name already exists for this store`,
+      );
     }
   }
 

@@ -18,6 +18,138 @@ import { ProductService } from './product.service';
 export class ProductController {
   constructor(private readonly productService: ProductService) {}
 
+  @Post('department/create')
+  createDepartment(
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.createDepartment(body, request.user);
+  }
+
+  @Get('department/store/:storeId')
+  listDepartments(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listDepartments(storeId, request.user);
+  }
+
+  @Patch('department/:id')
+  updateDepartment(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.updateDepartment(id, body, request.user);
+  }
+
+  @Delete('department/:id')
+  deleteDepartment(
+    @Param('id') id: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.deleteDepartment(id, request.user);
+  }
+
+  @Post('price-group/create')
+  createPriceGroup(
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.createPriceGroup(body, request.user);
+  }
+
+  @Get('price-group/store/:storeId')
+  listPriceGroups(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listPriceGroups(storeId, request.user);
+  }
+
+  @Patch('price-group/:id')
+  updatePriceGroup(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.updatePriceGroup(id, body, request.user);
+  }
+
+  @Delete('price-group/:id')
+  deletePriceGroup(
+    @Param('id') id: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.deletePriceGroup(id, request.user);
+  }
+
+  @Post('category/create')
+  createProductCategory(
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.createProductCategory(body, request.user);
+  }
+
+  @Get('category/store/:storeId')
+  listProductCategories(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listProductCategories(storeId, request.user);
+  }
+
+  @Patch('category/:id')
+  updateProductCategory(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.updateProductCategory(id, body, request.user);
+  }
+
+  @Delete('category/:id')
+  deleteProductCategory(
+    @Param('id') id: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.deleteProductCategory(id, request.user);
+  }
+
+  @Post('tax/create')
+  createTax(
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.createTax(body, request.user);
+  }
+
+  @Get('tax/store/:storeId')
+  listTaxes(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listTaxes(storeId, request.user);
+  }
+
+  @Patch('tax/:id')
+  updateTax(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.updateTax(id, body, request.user);
+  }
+
+  @Delete('tax/:id')
+  deleteTax(
+    @Param('id') id: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.deleteTax(id, request.user);
+  }
+
   @Post('create')
   create(
     @Body() body: Record<string, unknown>,
