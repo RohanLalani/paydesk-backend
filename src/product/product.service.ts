@@ -42,7 +42,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(storeId, user, 'manage_departments');
 
     return this.prisma.department.findMany({
-      where: { storeId },
+      where: { storeId, isActive: true },
       orderBy: { name: 'asc' },
     });
   }
@@ -91,7 +91,10 @@ export class ProductService {
       'Department is used by products and cannot be deleted',
     );
 
-    return this.prisma.department.delete({ where: { id } });
+    return this.prisma.department.update({
+      where: { id },
+      data: { isActive: false },
+    });
   }
 
   async createPriceGroup(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -118,7 +121,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(storeId, user, 'manage_price_groups');
 
     return this.prisma.priceGroup.findMany({
-      where: { storeId },
+      where: { storeId, isActive: true },
       orderBy: { name: 'asc' },
     });
   }
@@ -164,7 +167,10 @@ export class ProductService {
       'Price group is used by products and cannot be deleted',
     );
 
-    return this.prisma.priceGroup.delete({ where: { id } });
+    return this.prisma.priceGroup.update({
+      where: { id },
+      data: { isActive: false },
+    });
   }
 
   async createProductCategory(
@@ -199,7 +205,7 @@ export class ProductService {
     );
 
     return this.prisma.productCategory.findMany({
-      where: { storeId },
+      where: { storeId, isActive: true },
       orderBy: { name: 'asc' },
     });
   }
@@ -249,7 +255,10 @@ export class ProductService {
       'Product category is used by products and cannot be deleted',
     );
 
-    return this.prisma.productCategory.delete({ where: { id } });
+    return this.prisma.productCategory.update({
+      where: { id },
+      data: { isActive: false },
+    });
   }
 
   async createTax(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -272,7 +281,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(storeId, user, 'manage_taxes');
 
     return this.prisma.tax.findMany({
-      where: { storeId },
+      where: { storeId, isActive: true },
       orderBy: { name: 'asc' },
     });
   }
@@ -310,7 +319,10 @@ export class ProductService {
       'Tax is used by products and cannot be deleted',
     );
 
-    return this.prisma.tax.delete({ where: { id } });
+    return this.prisma.tax.update({
+      where: { id },
+      data: { isActive: false },
+    });
   }
 
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -498,7 +510,9 @@ export class ProductService {
     where: Prisma.ProductWhereInput,
     message: string,
   ) {
-    const productCount = await this.prisma.product.count({ where });
+    const productCount = await this.prisma.product.count({
+      where: { ...where, isActive: true },
+    });
 
     if (productCount > 0) {
       throw new BadRequestException(message);
@@ -528,16 +542,16 @@ export class ProductService {
   ) {
     const [department, priceGroup, productCategory, tax] = await Promise.all([
       this.prisma.department.findFirst({
-        where: { id: ids.departmentId, storeId },
+        where: { id: ids.departmentId, storeId, isActive: true },
       }),
       this.prisma.priceGroup.findFirst({
-        where: { id: ids.priceGroupId, storeId },
+        where: { id: ids.priceGroupId, storeId, isActive: true },
       }),
       this.prisma.productCategory.findFirst({
-        where: { id: ids.productCategoryId, storeId },
+        where: { id: ids.productCategoryId, storeId, isActive: true },
       }),
       this.prisma.tax.findFirst({
-        where: { id: ids.taxId, storeId },
+        where: { id: ids.taxId, storeId, isActive: true },
       }),
     ]);
 

@@ -297,6 +297,7 @@ model Department {
   id              String   @id @default(uuid())
   name            String
   defaultAllowEbt Boolean  @default(false)
+  isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -306,13 +307,14 @@ model Department {
   products Product[]
 
   @@unique([storeId, name])
-  @@index([storeId])
+  @@index([storeId, isActive])
 }
 
 model PriceGroup {
   id          String   @id @default(uuid())
   name        String
   description String?
+  isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -322,7 +324,7 @@ model PriceGroup {
   products Product[]
 
   @@unique([storeId, name])
-  @@index([storeId])
+  @@index([storeId, isActive])
 }
 
 model ProductCategory {
@@ -330,6 +332,7 @@ model ProductCategory {
   name        String
   brand       String?
   description String?
+  isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -339,13 +342,14 @@ model ProductCategory {
   products Product[]
 
   @@unique([storeId, name])
-  @@index([storeId])
+  @@index([storeId, isActive])
 }
 
 model Tax {
   id        String   @id @default(uuid())
   name      String
   rate      Float
+  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -355,7 +359,7 @@ model Tax {
   products Product[]
 
   @@unique([storeId, name])
-  @@index([storeId])
+  @@index([storeId, isActive])
 }
 
 model Customer {
