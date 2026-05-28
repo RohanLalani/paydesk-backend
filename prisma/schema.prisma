@@ -40,6 +40,18 @@ enum TaxStyle {
   post_discount
 }
 
+enum InventoryActionType {
+  receive
+  adjustment
+  sale
+  return
+  spoilage
+  waste
+  transfer_in
+  transfer_out
+  manual_edit
+}
+
 enum CustomerTierDiscountModel {
   ORDER_PERCENTAGE
   ORDER_FLAT_RATE
@@ -62,6 +74,7 @@ model Staff {
   storeStaff              StoreStaff[]
   passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
+  inventoryLogs           InventoryLog[]
 }
 
 model PasswordResetToken {
@@ -176,6 +189,7 @@ model Store {
 
   staff                   StoreStaff[]
   products                Product[]
+  inventoryLogs           InventoryLog[]
   departments             Department[]
   priceGroups             PriceGroup[]
   productCategories       ProductCategory[]
@@ -266,6 +280,7 @@ model Product {
   kitchenPrint                   Boolean         @default(false)
   allowEbt                       Boolean
   trackInventory                 Boolean         @default(true)
+  allowNegativeInventory         Boolean         @default(false)
   taxStyle                       TaxStyle
   isActive                       Boolean         @default(true)
   createdAt                      DateTime        @default(now())
@@ -285,6 +300,8 @@ model Product {
 
   taxId String
   tax   Tax    @relation(fields: [taxId], references: [id])
+
+  inventoryLogs InventoryLog[]
 
   @@index([storeId, isActive])
   @@index([departmentId])
@@ -308,6 +325,34 @@ model Department {
 
   @@unique([storeId, name])
   @@index([storeId, isActive])
+}
+
+model InventoryLog {
+  id              String              @id @default(uuid())
+  actionType      InventoryActionType
+  quantityBefore  Int
+  quantityChanged Int
+  quantityAfter   Int
+  reason          String
+  notes           String?
+  referenceType   String?
+  referenceId     String?
+  createdAt       DateTime            @default(now())
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id])
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  performedByStaffId String
+  staff              Staff  @relation(fields: [performedByStaffId], references: [id])
+
+  @@index([storeId, createdAt])
+  @@index([productId, createdAt])
+  @@index([performedByStaffId])
+  @@index([actionType])
+  @@index([referenceType, referenceId])
 }
 
 model PriceGroup {

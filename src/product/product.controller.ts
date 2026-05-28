@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Request,
   UseGuards,
 } from '@nestjs/common';
@@ -182,6 +183,64 @@ export class ProductController {
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.productService.findByBarcode(storeId, barcode, request.user);
+  }
+
+  @Post('inventory/receive')
+  receiveInventory(
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.receiveInventory(body, request.user);
+  }
+
+  @Post('inventory/adjust')
+  adjustInventory(
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.adjustInventory(body, request.user);
+  }
+
+  @Get('inventory/logs/store/:storeId')
+  listInventoryLogsByStore(
+    @Param('storeId') storeId: string,
+    @Query() query: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listInventoryLogsByStore(
+      storeId,
+      request.user,
+      query,
+    );
+  }
+
+  @Get('inventory/logs/product/:productId')
+  listInventoryLogsByProduct(
+    @Param('productId') productId: string,
+    @Query() query: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listInventoryLogsByProduct(
+      productId,
+      request.user,
+      query,
+    );
+  }
+
+  @Get('inventory/low-stock/:storeId')
+  listLowStock(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listLowStock(storeId, request.user);
+  }
+
+  @Get('inventory/out-of-stock/:storeId')
+  listOutOfStock(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listOutOfStock(storeId, request.user);
   }
 
   @Get(':productId')

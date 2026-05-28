@@ -4,7 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, ProductSaleType, TaxStyle } from '@prisma/client';
+import {
+  InventoryActionType,
+  Prisma,
+  ProductSaleType,
+  TaxStyle,
+} from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
@@ -16,7 +21,10 @@ export class ProductService {
     private readonly access: PosAccessService,
   ) {}
 
-  async createDepartment(body: Record<string, unknown>, user: AuthTokenPayload) {
+  async createDepartment(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
     const dto = {
       storeId: this.requiredString(body.storeId, 'storeId'),
       name: this.requiredString(body.name, 'name'),
@@ -97,7 +105,10 @@ export class ProductService {
     });
   }
 
-  async createPriceGroup(body: Record<string, unknown>, user: AuthTokenPayload) {
+  async createPriceGroup(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
     const dto = {
       storeId: this.requiredString(body.storeId, 'storeId'),
       name: this.requiredString(body.name, 'name'),
@@ -337,13 +348,30 @@ export class ProductService {
     const calculated = this.calculateProductFields(dto);
 
     try {
-      return await this.prisma.product.create({
-        data: {
-          ...dto,
-          ...calculated,
-          allowEbt: dto.allowEbt ?? relations.department.defaultAllowEbt,
-        },
-        include: this.productInclude,
+      return await this.prisma.$transaction(async (tx) => {
+        const product = await tx.product.create({
+          data: {
+            ...dto,
+            ...calculated,
+            allowEbt: dto.allowEbt ?? relations.department.defaultAllowEbt,
+          },
+          include: this.productInclude,
+        });
+
+        if (product.currentQuantity !== 0) {
+          await this.createInventoryLog(tx, {
+            storeId: product.storeId,
+            productId: product.id,
+            performedByStaffId: user.staffId,
+            actionType: InventoryActionType.manual_edit,
+            quantityBefore: 0,
+            quantityChanged: product.currentQuantity,
+            quantityAfter: product.currentQuantity,
+            reason: 'initial_quantity',
+          });
+        }
+
+        return product;
       });
     } catch (error) {
       this.handleBarcodeConflict(error);
@@ -386,10 +414,30 @@ export class ProductService {
     }
 
     try {
-      return await this.prisma.product.update({
-        where: { id: productId },
-        data,
-        include: this.productInclude,
+      return await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.product.update({
+          where: { id: productId },
+          data,
+          include: this.productInclude,
+        });
+
+        if (
+          dto.currentQuantity !== undefined &&
+          dto.currentQuantity !== product.currentQuantity
+        ) {
+          await this.createInventoryLog(tx, {
+            storeId: product.storeId,
+            productId,
+            performedByStaffId: user.staffId,
+            actionType: InventoryActionType.manual_edit,
+            quantityBefore: product.currentQuantity,
+            quantityChanged: dto.currentQuantity - product.currentQuantity,
+            quantityAfter: dto.currentQuantity,
+            reason: 'manual_edit',
+          });
+        }
+
+        return updated;
       });
     } catch (error) {
       this.handleBarcodeConflict(error);
@@ -456,6 +504,212 @@ export class ProductService {
       data: { isActive: false },
       include: this.productInclude,
     });
+  }
+
+  async receiveInventory(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const dto = this.parseReceiveInventoryBody(body);
+    await this.access.ensureStoreAccess(dto.storeId, user, 'update_inventory');
+
+    return this.prisma.$transaction(async (tx) => {
+      const updatedProducts: unknown[] = [];
+
+      for (const item of dto.items) {
+        const product = await this.findActiveProductInStoreOrThrow(
+          tx,
+          item.productId,
+          dto.storeId,
+        );
+        const quantityAfter = product.currentQuantity + item.quantity;
+        const costUpdates =
+          item.caseCost === undefined
+            ? {}
+            : {
+                caseCost: item.caseCost,
+                ...this.calculateProductFields({
+                  ...product,
+                  caseCost: item.caseCost,
+                }),
+              };
+
+        const updated = await tx.product.update({
+          where: { id: product.id },
+          data: {
+            currentQuantity: quantityAfter,
+            ...costUpdates,
+          },
+          include: this.productInclude,
+        });
+
+        await this.createInventoryLog(tx, {
+          storeId: dto.storeId,
+          productId: product.id,
+          performedByStaffId: user.staffId,
+          actionType: InventoryActionType.receive,
+          quantityBefore: product.currentQuantity,
+          quantityChanged: item.quantity,
+          quantityAfter,
+          reason: 'inventory_receive',
+          notes: item.notes,
+          referenceType: item.referenceId ? 'invoice' : undefined,
+          referenceId: item.referenceId,
+        });
+
+        updatedProducts.push(updated);
+      }
+
+      return updatedProducts;
+    });
+  }
+
+  async adjustInventory(body: Record<string, unknown>, user: AuthTokenPayload) {
+    const dto = this.parseAdjustInventoryBody(body);
+    await this.access.ensureStoreAccess(dto.storeId, user, 'update_inventory');
+
+    return this.prisma.$transaction(async (tx) => {
+      const product = await this.findActiveProductInStoreOrThrow(
+        tx,
+        dto.productId,
+        dto.storeId,
+      );
+      const quantityAfter = product.currentQuantity + dto.adjustment;
+
+      if (quantityAfter < 0 && !product.allowNegativeInventory) {
+        throw new BadRequestException('Inventory cannot go below zero');
+      }
+
+      const updated = await tx.product.update({
+        where: { id: product.id },
+        data: { currentQuantity: quantityAfter },
+        include: this.productInclude,
+      });
+
+      await this.createInventoryLog(tx, {
+        storeId: dto.storeId,
+        productId: product.id,
+        performedByStaffId: user.staffId,
+        actionType: InventoryActionType.adjustment,
+        quantityBefore: product.currentQuantity,
+        quantityChanged: dto.adjustment,
+        quantityAfter,
+        reason: dto.reason,
+        notes: dto.notes,
+        referenceType: 'adjustment',
+      });
+
+      return updated;
+    });
+  }
+
+  async listInventoryLogsByStore(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'view_store');
+    const pagination = this.parsePagination(query);
+
+    return this.prisma.inventoryLog.findMany({
+      where: { storeId },
+      orderBy: { createdAt: 'desc' },
+      skip: pagination.skip,
+      take: pagination.take,
+      include: this.inventoryLogInclude,
+    });
+  }
+
+  async listInventoryLogsByProduct(
+    productId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { storeId: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    await this.access.ensureStoreAccess(product.storeId, user, 'view_store');
+    const pagination = this.parsePagination(query);
+
+    return this.prisma.inventoryLog.findMany({
+      where: { productId },
+      orderBy: { createdAt: 'desc' },
+      skip: pagination.skip,
+      take: pagination.take,
+      include: this.inventoryLogInclude,
+    });
+  }
+
+  async listLowStock(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'view_store');
+
+    return this.prisma.product.findMany({
+      where: {
+        storeId,
+        isActive: true,
+        trackInventory: true,
+        minInventory: { not: null },
+        currentQuantity: { lte: this.prisma.product.fields.minInventory },
+      },
+      orderBy: { name: 'asc' },
+      include: this.productInclude,
+    });
+  }
+
+  async listOutOfStock(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'view_store');
+
+    return this.prisma.product.findMany({
+      where: {
+        storeId,
+        isActive: true,
+        trackInventory: true,
+        currentQuantity: { lte: 0 },
+      },
+      orderBy: { name: 'asc' },
+      include: this.productInclude,
+    });
+  }
+
+  private async findActiveProductInStoreOrThrow(
+    tx: Prisma.TransactionClient,
+    productId: string,
+    storeId: string,
+  ) {
+    const product = await tx.product.findFirst({
+      where: { id: productId, storeId, isActive: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return product;
+  }
+
+  private createInventoryLog(
+    tx: Prisma.TransactionClient,
+    data: {
+      storeId: string;
+      productId: string;
+      performedByStaffId: string;
+      actionType: InventoryActionType;
+      quantityBefore: number;
+      quantityChanged: number;
+      quantityAfter: number;
+      reason: string;
+      notes?: string | null;
+      referenceType?: string | null;
+      referenceId?: string | null;
+    },
+  ) {
+    return tx.inventoryLog.create({ data });
   }
 
   private async findDepartmentOrThrow(id: string) {
@@ -622,6 +876,66 @@ export class ProductService {
     };
   }
 
+  private parseReceiveInventoryBody(
+    body: Record<string, unknown>,
+  ): InventoryReceiveDto {
+    const items = body.items;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new BadRequestException('items must contain at least one item');
+    }
+
+    return {
+      storeId: this.requiredString(body.storeId, 'storeId'),
+      items: items.map((item, index) => {
+        if (!this.isObject(item)) {
+          throw new BadRequestException(`items.${index} must be an object`);
+        }
+
+        return {
+          productId: this.requiredString(
+            item.productId,
+            `items.${index}.productId`,
+          ),
+          quantity: this.requiredPositiveInt(
+            item.quantity,
+            `items.${index}.quantity`,
+          ),
+          caseCost:
+            item.caseCost === undefined
+              ? undefined
+              : this.optionalNumber(item.caseCost, `items.${index}.caseCost`),
+          referenceId:
+            item.referenceId === undefined
+              ? undefined
+              : this.optionalString(
+                  item.referenceId,
+                  `items.${index}.referenceId`,
+                ),
+          notes:
+            item.notes === undefined
+              ? undefined
+              : this.optionalString(item.notes, `items.${index}.notes`),
+        };
+      }),
+    };
+  }
+
+  private parseAdjustInventoryBody(
+    body: Record<string, unknown>,
+  ): InventoryAdjustmentDto {
+    return {
+      storeId: this.requiredString(body.storeId, 'storeId'),
+      productId: this.requiredString(body.productId, 'productId'),
+      adjustment: this.requiredNonZeroInt(body.adjustment, 'adjustment'),
+      reason: this.requiredString(body.reason, 'reason'),
+      notes:
+        body.notes === undefined
+          ? undefined
+          : this.optionalString(body.notes, 'notes'),
+    };
+  }
+
   private parseCreateBody(body: Record<string, unknown>): ProductCreateDto {
     return {
       storeId: this.requiredString(body.storeId, 'storeId'),
@@ -666,6 +980,12 @@ export class ProductService {
       trackInventory:
         this.optionalBoolean(body.trackInventory, 'trackInventory', true) ??
         true,
+      allowNegativeInventory:
+        this.optionalBoolean(
+          body.allowNegativeInventory,
+          'allowNegativeInventory',
+          false,
+        ) ?? false,
       taxStyle: this.requiredEnum(body.taxStyle, 'taxStyle', TaxStyle),
     };
   }
@@ -780,10 +1100,30 @@ export class ProductService {
         'trackInventory',
         true,
       );
+    if (body.allowNegativeInventory !== undefined)
+      updates.allowNegativeInventory = this.optionalBoolean(
+        body.allowNegativeInventory,
+        'allowNegativeInventory',
+        false,
+      );
     if (body.taxStyle !== undefined)
       updates.taxStyle = this.requiredEnum(body.taxStyle, 'taxStyle', TaxStyle);
 
     return updates;
+  }
+
+  private parsePagination(query: Record<string, unknown>) {
+    const page = this.optionalPositiveQueryInt(query.page, 'page') ?? 1;
+    const take = this.optionalPositiveQueryInt(query.take, 'take') ?? 50;
+
+    return {
+      skip: (page - 1) * take,
+      take: Math.min(take, 100),
+    };
+  }
+
+  private isObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
   private requiredString(value: unknown, field: string) {
@@ -846,11 +1186,58 @@ export class ProductService {
     return value;
   }
 
+  private requiredSignedInt(value: unknown, field: string) {
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      throw new BadRequestException(`${field} must be an integer`);
+    }
+
+    return value;
+  }
+
+  private requiredNonZeroInt(value: unknown, field: string) {
+    const parsed = this.requiredSignedInt(value, field);
+
+    if (parsed === 0) {
+      throw new BadRequestException(`${field} cannot be zero`);
+    }
+
+    return parsed;
+  }
+
+  private requiredPositiveInt(value: unknown, field: string) {
+    const parsed = this.requiredInt(value, field);
+
+    if (parsed <= 0) {
+      throw new BadRequestException(`${field} must be greater than zero`);
+    }
+
+    return parsed;
+  }
+
   private optionalPositiveInt(value: unknown, field: string) {
     const parsed = this.optionalInt(value, field);
 
     if (parsed !== null && parsed <= 0) {
       throw new BadRequestException(`${field} must be greater than zero`);
+    }
+
+    return parsed;
+  }
+
+  private optionalPositiveQueryInt(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    const parsed =
+      typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Number(value)
+          : NaN;
+
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new BadRequestException(`${field} must be a positive integer`);
     }
 
     return parsed;
@@ -928,6 +1315,12 @@ export class ProductService {
     tax: true,
     store: true,
   } satisfies Prisma.ProductInclude;
+
+  private readonly inventoryLogInclude = {
+    product: true,
+    staff: true,
+    store: true,
+  } satisfies Prisma.InventoryLogInclude;
 }
 
 type ProductCreateDto = ProductCalculationInput & {
@@ -955,10 +1348,30 @@ type ProductCreateDto = ProductCalculationInput & {
   kitchenPrint: boolean;
   allowEbt?: boolean;
   trackInventory: boolean;
+  allowNegativeInventory: boolean;
   taxStyle: TaxStyle;
 };
 
 type ProductUpdateDto = Partial<Omit<ProductCreateDto, 'storeId'>>;
+
+type InventoryReceiveDto = {
+  storeId: string;
+  items: {
+    productId: string;
+    quantity: number;
+    caseCost?: number | null;
+    referenceId?: string | null;
+    notes?: string | null;
+  }[];
+};
+
+type InventoryAdjustmentDto = {
+  storeId: string;
+  productId: string;
+  adjustment: number;
+  reason: string;
+  notes?: string | null;
+};
 
 type ProductCalculationInput = {
   unitsPerCase?: number | null;
