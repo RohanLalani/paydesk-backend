@@ -62,6 +62,13 @@ enum TransactionStatus {
   partially_refunded
 }
 
+enum CartStatus {
+  active
+  ready_for_payment
+  completed
+  cancelled
+}
+
 enum InventoryActionType {
   receive
   adjustment
@@ -98,6 +105,7 @@ model Staff {
   emailVerificationTokens EmailVerificationToken[]
   inventoryLogs           InventoryLog[]
   transactions            Transaction[]
+  carts                   Cart[]
 }
 
 model PasswordResetToken {
@@ -222,6 +230,7 @@ model Store {
   customerTierRules       CustomerTierRule[]
   customerPurchaseHistory CustomerPurchaseHistory[]
   transactions            Transaction[]
+  carts                   Cart[]
 
   @@index([ownerId, isActive])
 }
@@ -327,6 +336,7 @@ model Product {
 
   inventoryLogs    InventoryLog[]
   transactionItems TransactionItem[]
+  cartItems        CartItem[]
 
   @@index([storeId, isActive])
   @@index([departmentId])
@@ -447,6 +457,7 @@ model Customer {
   stores       CustomerStore[]
   purchases    CustomerPurchaseHistory[]
   transactions Transaction[]
+  carts        Cart[]
 }
 
 model CustomerStore {
@@ -535,6 +546,45 @@ model CustomerPurchaseHistory {
   @@index([customerId, purchasedAt])
   @@index([storeId, purchasedAt])
   @@index([transactionId])
+}
+
+model Cart {
+  id         String     @id @default(uuid())
+  storeId    String
+  staffId    String
+  customerId String?
+  status     CartStatus @default(active)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  store    Store     @relation(fields: [storeId], references: [id])
+  staff    Staff     @relation(fields: [staffId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+
+  items CartItem[]
+
+  @@index([storeId, status, updatedAt])
+  @@index([staffId, status])
+  @@index([customerId])
+}
+
+model CartItem {
+  id                  String   @id @default(uuid())
+  cartId              String
+  productId           String
+  quantity            Int
+  originalUnitPrice   Decimal  @db.Decimal(12, 2)
+  unitPrice           Decimal  @db.Decimal(12, 2)
+  priceOverrideReason String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  cart    Cart    @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@unique([cartId, productId])
+  @@index([cartId])
+  @@index([productId])
 }
 
 model Transaction {
