@@ -51,6 +51,12 @@ const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
     description: 'Can manage employee assignments',
   },
   {
+    key: StorePermissionKey.manage_registers,
+    label: 'Manage Registers',
+    description:
+      'Allows adding, editing, deactivating, revoking, and managing POS registers for a store.',
+  },
+  {
     key: StorePermissionKey.view_reports,
     label: 'View Reports',
     description: 'Can view store reports',

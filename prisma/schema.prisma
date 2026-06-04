@@ -97,9 +97,16 @@ enum StorePermissionKey {
   manage_inventory
   manage_customers
   manage_employees
+  manage_registers
   view_reports
   process_sales
   override_prices
+}
+
+enum RegisterStatus {
+  inactive
+  active
+  revoked
 }
 
 model Staff {
@@ -114,12 +121,13 @@ model Staff {
   manager  Manager?
   employee Employee?
 
-  storeStaff              StoreStaff[]
-  passwordResetTokens     PasswordResetToken[]
-  emailVerificationTokens EmailVerificationToken[]
-  inventoryLogs           InventoryLog[]
-  transactions            Transaction[]
-  carts                   Cart[]
+  storeStaff                     StoreStaff[]
+  passwordResetTokens            PasswordResetToken[]
+  emailVerificationTokens        EmailVerificationToken[]
+  inventoryLogs                  InventoryLog[]
+  transactions                   Transaction[]
+  carts                          Cart[]
+  createdRegisterActivationCodes RegisterActivationCode[]
 }
 
 model PasswordResetToken {
@@ -245,8 +253,71 @@ model Store {
   customerPurchaseHistory CustomerPurchaseHistory[]
   transactions            Transaction[]
   carts                   Cart[]
+  registers               Register[]
+  registerActivationCodes RegisterActivationCode[]
+  registerDevices         RegisterDevice[]
 
   @@index([ownerId, isActive])
+}
+
+model Register {
+  id             String         @id @default(uuid())
+  storeId        String
+  name           String
+  registerNumber String
+  description    String?
+  deviceName     String?
+  status         RegisterStatus @default(inactive)
+  activatedAt    DateTime?
+  lastSeenAt     DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  store           Store                    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  activationCodes RegisterActivationCode[]
+  devices         RegisterDevice[]
+  transactions    Transaction[]
+
+  @@unique([storeId, registerNumber])
+  @@index([storeId, status])
+}
+
+model RegisterActivationCode {
+  id               String    @id @default(uuid())
+  registerId       String
+  storeId          String
+  codeHash         String
+  expiresAt        DateTime
+  usedAt           DateTime?
+  createdByStaffId String
+  createdAt        DateTime  @default(now())
+
+  register       Register @relation(fields: [registerId], references: [id], onDelete: Cascade)
+  store          Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  createdByStaff Staff    @relation(fields: [createdByStaffId], references: [id])
+
+  @@index([registerId, usedAt, expiresAt])
+  @@index([storeId])
+  @@index([createdByStaffId])
+}
+
+model RegisterDevice {
+  id                String    @id @default(uuid())
+  registerId        String
+  storeId           String
+  deviceFingerprint String?
+  deviceName        String?
+  deviceTokenHash   String    @unique
+  isActive          Boolean   @default(true)
+  lastSeenAt        DateTime?
+  createdAt         DateTime  @default(now())
+  revokedAt         DateTime?
+
+  register Register @relation(fields: [registerId], references: [id], onDelete: Cascade)
+  store    Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([registerId, isActive])
+  @@index([storeId, isActive])
 }
 
 model StoreStaff {
@@ -619,6 +690,7 @@ model Transaction {
   id                String            @id @default(uuid())
   storeId           String
   staffId           String
+  registerId        String?
   customerId        String?
   subtotal          Decimal           @db.Decimal(12, 2)
   discountTotal     Decimal           @default(0) @db.Decimal(12, 2)
@@ -634,12 +706,15 @@ model Transaction {
 
   store    Store     @relation(fields: [storeId], references: [id])
   staff    Staff     @relation(fields: [staffId], references: [id])
+  register Register? @relation(fields: [registerId], references: [id])
   customer Customer? @relation(fields: [customerId], references: [id])
 
   items   TransactionItem[]
   receipt Receipt?
 
   @@index([storeId, createdAt])
+  @@index([registerId])
+  @@index([storeId, registerId, createdAt])
   @@index([staffId, createdAt])
   @@index([customerId, createdAt])
 }

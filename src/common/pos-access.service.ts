@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma.service';
 
 const ALL_STORE_PERMISSIONS = Object.values(StorePermissionKey);
 const PARTNER_DEFAULT_DENIED = new Set<StorePermissionKey>([
+  StorePermissionKey.add_store,
   StorePermissionKey.delete_store,
 ]);
 

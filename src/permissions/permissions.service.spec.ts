@@ -39,7 +39,9 @@ describe('PermissionsService', () => {
         .fn()
         .mockReturnValue(
           Object.values(StorePermissionKey).filter(
-            (permission) => permission !== StorePermissionKey.delete_store,
+            (permission) =>
+              permission !== StorePermissionKey.add_store &&
+              permission !== StorePermissionKey.delete_store,
           ),
         ),
       getEffectivePermissionsForStaff: jest.fn().mockResolvedValue([
@@ -59,6 +61,11 @@ describe('PermissionsService', () => {
         expect.objectContaining({
           key: StorePermissionKey.manage_products,
           label: 'Manage Products',
+          description: expect.any(String),
+        }),
+        expect.objectContaining({
+          key: StorePermissionKey.manage_registers,
+          label: 'Manage Registers',
           description: expect.any(String),
         }),
       ]),
@@ -94,6 +101,7 @@ describe('PermissionsService', () => {
       expect.objectContaining({
         role: StaffRole.partner,
         permissions: expect.not.arrayContaining([
+          StorePermissionKey.add_store,
           StorePermissionKey.delete_store,
         ]),
       }),

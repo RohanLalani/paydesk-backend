@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
@@ -28,9 +29,10 @@ export class TransactionController {
   @Post('checkout')
   checkout(
     @Body() body: Record<string, unknown>,
+    @Headers('x-register-token') registerToken: string | undefined,
     @Request() request: { user: AuthTokenPayload },
   ) {
-    return this.transactionService.checkout(body, request.user);
+    return this.transactionService.checkout(body, request.user, registerToken);
   }
 
   @Get('store/:storeId')

@@ -36,7 +36,7 @@ describe('PosAccessService', () => {
     expect(permissions).toEqual(Object.values(StorePermissionKey));
   });
 
-  it('gives partners every permission except delete_store by default', async () => {
+  it('gives partners every permission except add_store and delete_store by default', async () => {
     prisma.storeStaff.findUnique.mockResolvedValue({
       id: 'store-staff-partner-1',
       storeId: 'store-1',
@@ -53,7 +53,9 @@ describe('PosAccessService', () => {
     });
 
     expect(permissions).toContain(StorePermissionKey.manage_products);
+    expect(permissions).toContain(StorePermissionKey.manage_registers);
     expect(permissions).toContain(StorePermissionKey.override_prices);
+    expect(permissions).not.toContain(StorePermissionKey.add_store);
     expect(permissions).not.toContain(StorePermissionKey.delete_store);
   });
 

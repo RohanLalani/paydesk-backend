@@ -11,12 +11,14 @@ import {
 } from '@prisma/client';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
+import { RegistersService } from '../registers/registers.service';
 import { TransactionService } from './transaction.service';
 
 describe('TransactionService checkout', () => {
   let service: TransactionService;
   let prisma: MockPrisma;
   let access: { ensureStoreAccess: jest.Mock };
+  let registers: { validateRegisterTokenForStore: jest.Mock };
   let state: TestState;
 
   const user = {
@@ -30,9 +32,18 @@ describe('TransactionService checkout', () => {
     state = createState();
     prisma = createMockPrisma(state);
     access = { ensureStoreAccess: jest.fn().mockResolvedValue(undefined) };
+    registers = {
+      validateRegisterTokenForStore: jest.fn().mockResolvedValue({
+        register: {
+          id: 'register-1',
+          storeId: 'store-1',
+        },
+      }),
+    };
     service = new TransactionService(
       prisma as unknown as PrismaService,
       access as unknown as PosAccessService,
+      registers as unknown as RegistersService,
     );
   });
 
@@ -58,6 +69,21 @@ describe('TransactionService checkout', () => {
       receiptNumber: expect.stringMatching(/^\d{8}-\d{6}$/),
     });
     expect(state.cart.status).toBe(CartStatus.completed);
+  });
+
+  it('stores the register id when checkout includes a register token', async () => {
+    const result = await service.checkout(
+      { cartId: 'cart-1', paymentMethod: PaymentMethod.cash },
+      user,
+      'reg_token',
+    );
+
+    expect(registers.validateRegisterTokenForStore).toHaveBeenCalledWith(
+      'reg_token',
+      'store-1',
+    );
+    expect(result.transaction.registerId).toBe('register-1');
+    expect(state.transactions[0].registerId).toBe('register-1');
   });
 
   it('deducts inventory and creates sale inventory logs', async () => {
@@ -247,6 +273,7 @@ function createMockPrisma(state: TestState): MockPrisma {
           id: `transaction-${state.transactions.length + 1}`,
           storeId: data.storeId,
           staffId: data.staffId,
+          registerId: data.registerId ?? null,
           customerId: data.customerId,
           subtotal: data.subtotal,
           discountTotal: data.discountTotal,
@@ -261,6 +288,14 @@ function createMockPrisma(state: TestState): MockPrisma {
           updatedAt: new Date('2026-06-03T12:00:00.000Z'),
           store: state.store,
           staff: state.staff,
+          register: data.registerId
+            ? {
+                id: data.registerId,
+                name: 'Front Register 1',
+                registerNumber: 'REG-001',
+                status: 'active',
+              }
+            : null,
           customer: state.customer,
           items: data.items.create.map((item, index) => ({
             id: `transaction-item-${index + 1}`,

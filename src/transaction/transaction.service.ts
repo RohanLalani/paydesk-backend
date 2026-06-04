@@ -16,12 +16,14 @@ import {
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
+import { RegistersService } from '../registers/registers.service';
 
 @Injectable()
 export class TransactionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    private readonly registers: RegistersService,
   ) {}
 
   async validateCart(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -33,7 +35,11 @@ export class TransactionService {
     return this.toValidatedCartResponse(validated);
   }
 
-  async checkout(body: Record<string, unknown>, user: AuthTokenPayload) {
+  async checkout(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+    registerToken?: string,
+  ) {
     const dto = this.parseCartCheckoutBody(body);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -48,6 +54,12 @@ export class TransactionService {
             user,
             'process_sales',
           );
+          const registerContext = registerToken
+            ? await this.registers.validateRegisterTokenForStore(
+                registerToken,
+                cart.storeId,
+              )
+            : null;
 
           const validated = await this.validateCheckoutCart(tx, cart);
           this.validatePaymentMethodForCart(dto.paymentMethod, validated);
@@ -57,6 +69,7 @@ export class TransactionService {
             data: {
               storeId: cart.storeId,
               staffId: user.staffId,
+              registerId: registerContext?.register.id,
               customerId: cart.customerId,
               subtotal: validated.subtotal,
               discountTotal: validated.discountTotal,
@@ -215,6 +228,14 @@ export class TransactionService {
             role: true,
           },
         },
+        register: {
+          select: {
+            id: true,
+            name: true,
+            registerNumber: true,
+            status: true,
+          },
+        },
       },
     });
 
@@ -223,6 +244,7 @@ export class TransactionService {
       storeId: transaction.storeId,
       customerId: transaction.customerId,
       staffId: transaction.staffId,
+      registerId: transaction.registerId,
       receiptNumber: transaction.receiptNumber,
       paymentMethod: transaction.paymentMethod,
       paymentStatus: transaction.paymentStatus,
@@ -237,6 +259,7 @@ export class TransactionService {
       itemCount: transaction._count.items,
       customer: transaction.customer,
       staff: transaction.staff,
+      register: transaction.register,
     }));
   }
 
@@ -971,6 +994,7 @@ export class TransactionService {
       id: transaction.id,
       storeId: transaction.storeId,
       staffId: transaction.staffId,
+      registerId: transaction.registerId,
       customerId: transaction.customerId,
       subtotal: this.moneyToString(transaction.subtotal),
       discountTotal: this.moneyToString(transaction.discountTotal),
@@ -985,6 +1009,7 @@ export class TransactionService {
       updatedAt: transaction.updatedAt,
       store: transaction.store,
       staff: transaction.staff,
+      register: transaction.register,
       customer: transaction.customer,
       items: transaction.items.map((item) => ({
         id: item.id,
@@ -1260,6 +1285,14 @@ export class TransactionService {
         role: true,
       },
     },
+    register: {
+      select: {
+        id: true,
+        name: true,
+        registerNumber: true,
+        status: true,
+      },
+    },
     customer: {
       select: {
         id: true,
@@ -1353,6 +1386,14 @@ type TransactionWithRelations = Prisma.TransactionGetPayload<{
         id: true;
         name: true;
         role: true;
+      };
+    };
+    register: {
+      select: {
+        id: true;
+        name: true;
+        registerNumber: true;
+        status: true;
       };
     };
     customer: {

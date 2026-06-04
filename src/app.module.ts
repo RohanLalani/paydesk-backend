@@ -10,6 +10,7 @@ import { PrismaExceptionFilter } from './common/prisma-exception.filter';
 import { CustomerModule } from './customer/customer.module';
 import { ProductModule } from './product/product.module';
 import { PermissionsModule } from './permissions/permissions.module';
+import { RegistersModule } from './registers/registers.module';
 import { StoreModule } from './store/store.module';
 import { TransactionModule } from './transaction/transaction.module';
 
@@ -28,6 +29,7 @@ import { TransactionModule } from './transaction/transaction.module';
     CartModule,
     CustomerModule,
     PermissionsModule,
+    RegistersModule,
     StoreModule,
     ProductModule,
     TransactionModule,
