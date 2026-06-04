@@ -9,7 +9,6 @@ import {
   CartStatus,
   CustomerTierDiscountModel,
   Prisma,
-  StaffRole,
   TaxStyle,
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
@@ -25,7 +24,7 @@ export class CartService {
 
   async start(body: Record<string, unknown>, user: AuthTokenPayload) {
     const storeId = this.requiredString(body.storeId, 'storeId');
-    await this.access.ensureStoreAccess(storeId, user, 'view_store');
+    await this.access.ensureStoreAccess(storeId, user, 'process_sales');
 
     const cart = await this.prisma.cart.create({
       data: {
@@ -167,8 +166,6 @@ export class CartService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    this.ensureCanOverridePrice(user);
-
     const dto = {
       price: this.requiredMoney(body.price, 'price'),
       reason: this.requiredString(body.reason, 'reason'),
@@ -182,6 +179,11 @@ export class CartService {
       await this.lockCart(tx, cartId);
 
       const cart = await this.getActiveCartForUser(cartId, user, tx);
+      await this.access.ensureStoreAccess(
+        cart.storeId,
+        user,
+        'override_prices',
+      );
       const item = this.findItemInCart(cart, itemId);
 
       await this.lockCartItem(tx, item.id);
@@ -273,10 +275,11 @@ export class CartService {
     cartId: string,
     user: AuthTokenPayload,
     tx: CartPrismaClient = this.prisma,
+    permission: 'view_store' | 'process_sales' = 'view_store',
   ) {
     const cart = await this.getCartOrThrow(tx, cartId);
 
-    await this.access.ensureStoreAccess(cart.storeId, user, 'view_store');
+    await this.access.ensureStoreAccess(cart.storeId, user, permission);
 
     return cart;
   }
@@ -286,7 +289,7 @@ export class CartService {
     user: AuthTokenPayload,
     tx: CartPrismaClient = this.prisma,
   ) {
-    const cart = await this.getCartForUser(cartId, user, tx);
+    const cart = await this.getCartForUser(cartId, user, tx, 'process_sales');
 
     if (cart.status !== CartStatus.active) {
       throw new BadRequestException('Cart is not active');
@@ -311,16 +314,6 @@ export class CartService {
     }
 
     return item;
-  }
-
-  private ensureCanOverridePrice(user: AuthTokenPayload) {
-    if (
-      user.type !== StaffRole.owner &&
-      user.type !== StaffRole.partner &&
-      user.type !== StaffRole.manager
-    ) {
-      throw new ForbiddenException('You cannot override item prices');
-    }
   }
 
   private async validateCartQuantities(

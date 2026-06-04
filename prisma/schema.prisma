@@ -88,6 +88,20 @@ enum CustomerTierDiscountModel {
   ITEM_FLAT_RATE
 }
 
+enum StorePermissionKey {
+  view_store
+  add_store
+  edit_store
+  delete_store
+  manage_products
+  manage_inventory
+  manage_customers
+  manage_employees
+  view_reports
+  process_sales
+  override_prices
+}
+
 model Staff {
   id              String    @id @default(uuid())
   email           String    @unique
@@ -257,7 +271,21 @@ model StoreStaff {
 
   createdAt DateTime @default(now())
 
+  permissions StoreStaffPermission[]
+
   @@unique([storeId, staffId])
+}
+
+model StoreStaffPermission {
+  id           String             @id @default(uuid())
+  storeStaffId String
+  permission   StorePermissionKey
+  createdAt    DateTime           @default(now())
+
+  storeStaff StoreStaff @relation(fields: [storeStaffId], references: [id], onDelete: Cascade)
+
+  @@unique([storeStaffId, permission])
+  @@index([storeStaffId])
 }
 
 model Subscription {

@@ -6,12 +6,14 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { CustomerTierDiscountModel, Prisma, StaffRole } from '@prisma/client';
+import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
 import { CustomerService } from './customer.service';
 
 describe('CustomerService', () => {
   let service: CustomerService;
   let prisma: MockPrismaService;
+  let access: { ensureStoreAccess: jest.Mock };
 
   const ownerUser = {
     accountId: 'owner-1',
@@ -43,6 +45,9 @@ describe('CustomerService', () => {
 
   beforeEach(async () => {
     prisma = createMockPrisma();
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(ownerStore),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -50,6 +55,10 @@ describe('CustomerService', () => {
         {
           provide: PrismaService,
           useValue: prisma,
+        },
+        {
+          provide: PosAccessService,
+          useValue: access,
         },
       ],
     }).compile();
@@ -112,6 +121,13 @@ describe('CustomerService', () => {
   });
 
   it('fetches a customer by customerNumber when the user can access one linked store', async () => {
+    access.ensureStoreAccess.mockImplementation((storeId: string) => {
+      if (storeId === 'store-1') {
+        return Promise.resolve(ownerStore);
+      }
+
+      return Promise.reject(new ForbiddenException('No access'));
+    });
     prisma.customer.findUnique.mockResolvedValue(
       customerFixture({
         stores: [

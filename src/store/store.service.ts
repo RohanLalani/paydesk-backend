@@ -112,36 +112,7 @@ export class StoreService {
   }
 
   async assertCanManageStore(user: AuthTokenPayload, storeId: string) {
-    const store = await this.prisma.store.findFirst({
-      where: { id: storeId, isActive: true },
-    });
-
-    if (!store) {
-      throw new NotFoundException('Store not found');
-    }
-
-    if (user.type === StaffRole.owner && user.accountId === store.ownerId) {
-      return store;
-    }
-
-    if (user.type !== StaffRole.partner) {
-      throw new ForbiddenException('You cannot manage store details');
-    }
-
-    const assignment = await this.prisma.storeStaff.findUnique({
-      where: {
-        storeId_staffId: {
-          storeId,
-          staffId: user.staffId,
-        },
-      },
-    });
-
-    if (assignment?.role === StaffRole.partner) {
-      return store;
-    }
-
-    throw new ForbiddenException('You cannot manage store details');
+    return this.access.ensureStoreAccess(storeId, user, 'edit_store');
   }
 
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {

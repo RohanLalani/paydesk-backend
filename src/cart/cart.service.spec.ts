@@ -69,6 +69,11 @@ describe('CartService race safety', () => {
       },
     });
     expect(result.items[0]).toMatchObject({ id: 'item-1', quantity: 3 });
+    expect(access.ensureStoreAccess).toHaveBeenCalledWith(
+      'store-1',
+      user,
+      'process_sales',
+    );
   });
 
   it('retries when a simultaneous first scan creates the same cart item', async () => {
@@ -190,6 +195,11 @@ describe('CartService race safety', () => {
     ]).toEqual(expect.arrayContaining(['Second manager']));
     expect(second.items[0].priceOverrideReason).toBe('Second manager');
     expect(state.cart.items[0].unitPrice.toFixed(2)).toBe('1.99');
+    expect(access.ensureStoreAccess).toHaveBeenCalledWith(
+      'store-1',
+      user,
+      'override_prices',
+    );
   });
 });
 

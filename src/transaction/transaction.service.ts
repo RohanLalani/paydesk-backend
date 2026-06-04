@@ -43,7 +43,11 @@ export class TransactionService {
 
           const cart = await this.getCheckoutCart(tx, dto.cartId);
 
-          await this.access.ensureStoreAccess(cart.storeId, user, 'view_store');
+          await this.access.ensureStoreAccess(
+            cart.storeId,
+            user,
+            'process_sales',
+          );
 
           const validated = await this.validateCheckoutCart(tx, cart);
           this.validatePaymentMethodForCart(dto.paymentMethod, validated);

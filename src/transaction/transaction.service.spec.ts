@@ -45,7 +45,7 @@ describe('TransactionService checkout', () => {
     expect(access.ensureStoreAccess).toHaveBeenCalledWith(
       'store-1',
       user,
-      'view_store',
+      'process_sales',
     );
     expect(result.transaction).toMatchObject({
       id: 'transaction-1',

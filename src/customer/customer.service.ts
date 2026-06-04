@@ -8,17 +8,25 @@ import {
 import { CustomerTierDiscountModel, Prisma, StaffRole } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
+import { PosAccessService, StorePermission } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
 
 @Injectable()
 export class CustomerService {
   private readonly purchaseHistoryDays = 60;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly access: PosAccessService,
+  ) {}
 
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {
     const dto = this.parseCreateCustomerBody(body);
-    const store = await this.ensureStoreAccess(dto.storeId, user);
+    const store = await this.ensureStoreAccess(
+      dto.storeId,
+      user,
+      'manage_customers',
+    );
     const customerNumber = await this.generateUniqueCustomerNumber();
 
     try {
@@ -116,7 +124,11 @@ export class CustomerService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    const accessibleStoreIds = await this.ensureCustomerAccess(id, user);
+    const accessibleStoreIds = await this.ensureCustomerAccess(
+      id,
+      user,
+      'manage_customers',
+    );
     const updates = this.parseUpdateCustomerBody(body);
 
     if (!Object.keys(updates).length) {
@@ -145,7 +157,11 @@ export class CustomerService {
 
   async createTier(body: Record<string, unknown>, user: AuthTokenPayload) {
     const dto = this.parseCreateTierBody(body);
-    const store = await this.ensureStoreAccess(dto.storeId, user);
+    const store = await this.ensureStoreAccess(
+      dto.storeId,
+      user,
+      'manage_customers',
+    );
 
     if (user.type !== 'owner' || user.accountId !== store.ownerId) {
       throw new ForbiddenException('Only the store owner can manage tiers');
@@ -174,7 +190,11 @@ export class CustomerService {
 
   async createTierRule(body: Record<string, unknown>, user: AuthTokenPayload) {
     const dto = this.parseCreateTierRuleBody(body);
-    const store = await this.ensureStoreAccess(dto.storeId, user);
+    const store = await this.ensureStoreAccess(
+      dto.storeId,
+      user,
+      'manage_customers',
+    );
 
     if (user.type !== 'owner' || user.accountId !== store.ownerId) {
       throw new ForbiddenException(
@@ -236,7 +256,7 @@ export class CustomerService {
     const storeId = this.optionalString(body.storeId, 'storeId');
 
     if (storeId) {
-      await this.ensureStoreAccess(storeId, user);
+      await this.ensureStoreAccess(storeId, user, 'manage_customers');
     }
 
     const customerStore = await this.findCustomerStoreForTierUpdate(
@@ -423,6 +443,7 @@ export class CustomerService {
   private async ensureCustomerAccess(
     customerId: string,
     user: AuthTokenPayload,
+    permission: StorePermission = 'view_store',
   ) {
     const customerStores = await this.prisma.customerStore.findMany({
       where: { customerId },
@@ -436,7 +457,7 @@ export class CustomerService {
     const accessibleStoreIds: string[] = [];
 
     for (const customerStore of customerStores) {
-      if (await this.canAccessStore(customerStore.store, user)) {
+      if (await this.canAccessStore(customerStore.store, user, permission)) {
         accessibleStoreIds.push(customerStore.storeId);
       }
     }
@@ -448,25 +469,22 @@ export class CustomerService {
     return accessibleStoreIds;
   }
 
-  private async ensureStoreAccess(storeId: string, user: AuthTokenPayload) {
-    const store = await this.prisma.store.findUnique({
-      where: { id: this.requiredString(storeId, 'storeId') },
-    });
-
-    if (!store || store.isActive === false) {
-      throw new NotFoundException('Store not found');
-    }
-
-    if (await this.canAccessStore(store, user)) {
-      return store;
-    }
-
-    throw new ForbiddenException('You do not have access to this store');
+  private async ensureStoreAccess(
+    storeId: string,
+    user: AuthTokenPayload,
+    permission: StorePermission = 'view_store',
+  ) {
+    return this.access.ensureStoreAccess(
+      this.requiredString(storeId, 'storeId'),
+      user,
+      permission,
+    );
   }
 
   private async canAccessStore(
     store: { id: string; ownerId: string; isActive?: boolean },
     user: AuthTokenPayload,
+    permission: StorePermission = 'view_store',
   ) {
     if (store.isActive === false) {
       return false;
@@ -476,16 +494,12 @@ export class CustomerService {
       return true;
     }
 
-    const staffStore = await this.prisma.storeStaff.findUnique({
-      where: {
-        storeId_staffId: {
-          storeId: store.id,
-          staffId: user.staffId,
-        },
-      },
-    });
-
-    return Boolean(staffStore);
+    try {
+      await this.access.ensureStoreAccess(store.id, user, permission);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async findCustomerByIdOrThrow(id: string) {

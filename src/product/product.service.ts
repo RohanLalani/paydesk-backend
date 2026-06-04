@@ -35,7 +35,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       dto.storeId,
       user,
-      'manage_departments',
+      'manage_products',
     );
 
     try {
@@ -47,7 +47,7 @@ export class ProductService {
   }
 
   async listDepartments(storeId: string, user: AuthTokenPayload) {
-    await this.access.ensureStoreAccess(storeId, user, 'manage_departments');
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
 
     return this.prisma.department.findMany({
       where: { storeId, isActive: true },
@@ -64,7 +64,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       department.storeId,
       user,
-      'manage_departments',
+      'manage_products',
     );
     const data: Prisma.DepartmentUpdateInput = {};
 
@@ -92,7 +92,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       department.storeId,
       user,
-      'manage_departments',
+      'manage_products',
     );
     await this.ensureSetupTableNotInUse(
       { departmentId: id },
@@ -117,7 +117,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       dto.storeId,
       user,
-      'manage_price_groups',
+      'manage_products',
     );
 
     try {
@@ -129,7 +129,7 @@ export class ProductService {
   }
 
   async listPriceGroups(storeId: string, user: AuthTokenPayload) {
-    await this.access.ensureStoreAccess(storeId, user, 'manage_price_groups');
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
 
     return this.prisma.priceGroup.findMany({
       where: { storeId, isActive: true },
@@ -146,7 +146,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       priceGroup.storeId,
       user,
-      'manage_price_groups',
+      'manage_products',
     );
     const data: Prisma.PriceGroupUpdateInput = {};
 
@@ -171,7 +171,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       priceGroup.storeId,
       user,
-      'manage_price_groups',
+      'manage_products',
     );
     await this.ensureSetupTableNotInUse(
       { priceGroupId: id },
@@ -197,7 +197,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       dto.storeId,
       user,
-      'manage_product_categories',
+      'manage_products',
     );
 
     try {
@@ -212,7 +212,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       storeId,
       user,
-      'manage_product_categories',
+      'manage_products',
     );
 
     return this.prisma.productCategory.findMany({
@@ -230,7 +230,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       productCategory.storeId,
       user,
-      'manage_product_categories',
+      'manage_products',
     );
     const data: Prisma.ProductCategoryUpdateInput = {};
 
@@ -259,7 +259,7 @@ export class ProductService {
     await this.access.ensureStoreAccess(
       productCategory.storeId,
       user,
-      'manage_product_categories',
+      'manage_products',
     );
     await this.ensureSetupTableNotInUse(
       { productCategoryId: id },
@@ -278,7 +278,7 @@ export class ProductService {
       name: this.requiredString(body.name, 'name'),
       rate: this.requiredNumber(body.rate, 'rate'),
     };
-    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_taxes');
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
 
     try {
       return await this.prisma.tax.create({ data: dto });
@@ -289,7 +289,7 @@ export class ProductService {
   }
 
   async listTaxes(storeId: string, user: AuthTokenPayload) {
-    await this.access.ensureStoreAccess(storeId, user, 'manage_taxes');
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
 
     return this.prisma.tax.findMany({
       where: { storeId, isActive: true },
@@ -303,7 +303,7 @@ export class ProductService {
     user: AuthTokenPayload,
   ) {
     const tax = await this.findTaxOrThrow(id);
-    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_taxes');
+    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_products');
     const data: Prisma.TaxUpdateInput = {};
 
     if (body.name !== undefined) {
@@ -324,7 +324,7 @@ export class ProductService {
 
   async deleteTax(id: string, user: AuthTokenPayload) {
     const tax = await this.findTaxOrThrow(id);
-    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_taxes');
+    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_products');
     await this.ensureSetupTableNotInUse(
       { taxId: id },
       'Tax is used by products and cannot be deleted',
@@ -511,7 +511,7 @@ export class ProductService {
     user: AuthTokenPayload,
   ) {
     const dto = this.parseReceiveInventoryBody(body);
-    await this.access.ensureStoreAccess(dto.storeId, user, 'update_inventory');
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_inventory');
 
     return this.prisma.$transaction(async (tx) => {
       const updatedProducts: unknown[] = [];
@@ -566,7 +566,7 @@ export class ProductService {
 
   async adjustInventory(body: Record<string, unknown>, user: AuthTokenPayload) {
     const dto = this.parseAdjustInventoryBody(body);
-    await this.access.ensureStoreAccess(dto.storeId, user, 'update_inventory');
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_inventory');
 
     return this.prisma.$transaction(async (tx) => {
       const product = await this.findActiveProductInStoreOrThrow(
