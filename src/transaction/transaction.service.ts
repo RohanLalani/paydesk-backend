@@ -6,9 +6,12 @@ import {
 } from '@nestjs/common';
 import {
   InventoryActionType,
+  CartStatus,
   PaymentMethod,
+  PaymentStatus,
   Prisma,
   TaxStyle,
+  TransactionStatus,
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
@@ -31,40 +34,34 @@ export class TransactionService {
   }
 
   async checkout(body: Record<string, unknown>, user: AuthTokenPayload) {
-    const dto = this.parseCheckoutBody(body);
-    await this.access.ensureStoreAccess(dto.storeId, user, 'view_store');
+    const dto = this.parseCartCheckoutBody(body);
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         return await this.prisma.$transaction(async (tx) => {
-          const validated = await this.validateCartForStore(dto, tx);
+          await this.lockCart(tx, dto.cartId);
+
+          const cart = await this.getCheckoutCart(tx, dto.cartId);
+
+          await this.access.ensureStoreAccess(cart.storeId, user, 'view_store');
+
+          const validated = await this.validateCheckoutCart(tx, cart);
           this.validatePaymentMethodForCart(dto.paymentMethod, validated);
-          const customer = dto.customerId
-            ? await this.validateCustomerForCheckout(
-                tx,
-                dto.customerId,
-                dto.storeId,
-              )
-            : null;
-          const rewardPointsEarned = customer
-            ? validated.total
-                .toDecimalPlaces(0, Prisma.Decimal.ROUND_FLOOR)
-                .toNumber()
-            : 0;
           const receiptNumber = await this.generateReceiptNumber(tx);
 
           const transaction = await tx.transaction.create({
             data: {
-              storeId: dto.storeId,
+              storeId: cart.storeId,
               staffId: user.staffId,
-              customerId: customer?.id,
+              customerId: cart.customerId,
               subtotal: validated.subtotal,
               discountTotal: validated.discountTotal,
               taxTotal: validated.taxTotal,
               total: validated.total,
               paymentMethod: dto.paymentMethod,
+              paymentStatus: PaymentStatus.paid,
+              transactionStatus: TransactionStatus.completed,
               receiptNumber,
-              notes: dto.notes,
               items: {
                 create: validated.items.map((item) => ({
                   productId: item.productId,
@@ -83,20 +80,12 @@ export class TransactionService {
             include: this.fullTransactionInclude,
           });
 
-          const inventoryBalances = new Map(
-            validated.items.map((item) => [
-              item.productId,
-              item.currentQuantity,
-            ]),
-          );
-
           for (const item of validated.items) {
             if (!item.trackInventory) {
               continue;
             }
 
-            const quantityBefore =
-              inventoryBalances.get(item.productId) ?? item.currentQuantity;
+            const quantityBefore = item.currentQuantity;
             const quantityAfter = quantityBefore - item.quantity;
 
             const updateResult = item.allowNegativeInventory
@@ -118,11 +107,9 @@ export class TransactionService {
               );
             }
 
-            inventoryBalances.set(item.productId, quantityAfter);
-
             await tx.inventoryLog.create({
               data: {
-                storeId: dto.storeId,
+                storeId: cart.storeId,
                 productId: item.productId,
                 performedByStaffId: user.staffId,
                 actionType: InventoryActionType.sale,
@@ -136,26 +123,26 @@ export class TransactionService {
             });
           }
 
-          if (customer) {
+          if (cart.customerId) {
             await tx.customerPurchaseHistory.create({
               data: {
-                customerId: customer.id,
-                storeId: dto.storeId,
+                customerId: cart.customerId,
+                storeId: cart.storeId,
                 transactionId: transaction.id,
                 totalSpend: validated.total,
               },
             });
 
-            await tx.customer.update({
-              where: { id: customer.id },
-              data: { rewardPoints: { increment: rewardPointsEarned } },
-            });
+            await this.recalculateCustomerTierForStore(
+              tx,
+              cart.customerId,
+              cart.storeId,
+            );
           }
 
-          const receiptData = this.buildReceiptData(
+          const receiptData = this.buildCheckoutReceiptData(
             transaction,
-            receiptNumber,
-            rewardPointsEarned,
+            validated,
           );
           const receipt = await tx.receipt.create({
             data: {
@@ -163,6 +150,11 @@ export class TransactionService {
               receiptNumber,
               receiptData,
             },
+          });
+
+          await tx.cart.update({
+            where: { id: cart.id },
+            data: { status: CartStatus.completed },
           });
 
           return {
@@ -303,6 +295,20 @@ export class TransactionService {
     return receipt.receiptData;
   }
 
+  async findReceiptByNumberWithoutUser(receiptNumber: string) {
+    const receipt = await this.prisma.receipt.findUnique({
+      where: {
+        receiptNumber: this.requiredString(receiptNumber, 'receiptNumber'),
+      },
+    });
+
+    if (!receipt) {
+      throw new NotFoundException('Receipt not found');
+    }
+
+    return receipt.receiptData;
+  }
+
   private async validateCartForStore(
     dto: CartDto,
     tx: Prisma.TransactionClient | PrismaService,
@@ -396,6 +402,253 @@ export class TransactionService {
     };
   }
 
+  private async getCheckoutCart(tx: Prisma.TransactionClient, cartId: string) {
+    const cart = await tx.cart.findUnique({
+      where: { id: this.requiredString(cartId, 'cartId') },
+      include: this.checkoutCartInclude,
+    });
+
+    if (!cart) {
+      throw new NotFoundException('Cart not found');
+    }
+
+    if (cart.status !== CartStatus.ready_for_payment) {
+      throw new BadRequestException('Cart is not ready for payment');
+    }
+
+    if (!cart.items.length) {
+      throw new BadRequestException('Cart is empty');
+    }
+
+    return cart;
+  }
+
+  private async validateCheckoutCart(
+    tx: Prisma.TransactionClient,
+    cart: CheckoutCart,
+  ): Promise<ValidatedCart> {
+    const itemCalculations = cart.items.map((item) => {
+      const originalSubtotal = this.money(item.originalUnitPrice).mul(
+        item.quantity,
+      );
+      const lineSubtotal = this.money(item.unitPrice).mul(item.quantity);
+      const itemDiscount = Prisma.Decimal.max(
+        originalSubtotal.minus(lineSubtotal),
+        0,
+      );
+
+      return {
+        item,
+        originalSubtotal: this.roundMoney(originalSubtotal),
+        lineSubtotal: this.roundMoney(lineSubtotal),
+        itemDiscount: this.roundMoney(itemDiscount),
+        loyaltyDiscount: this.money(0),
+      };
+    });
+    const subtotal = this.roundMoney(
+      itemCalculations.reduce(
+        (total, item) => total.plus(item.lineSubtotal),
+        this.money(0),
+      ),
+    );
+    const itemDiscountTotal = this.roundMoney(
+      itemCalculations.reduce(
+        (total, item) => total.plus(item.itemDiscount),
+        this.money(0),
+      ),
+    );
+    const loyaltyDiscountTotal = this.applyCartLoyaltyDiscounts(
+      cart,
+      itemCalculations,
+      subtotal,
+    );
+    let taxTotal = this.money(0);
+    const checkoutItems: ValidatedCartItem[] = [];
+
+    for (const calculation of itemCalculations) {
+      const lockedProduct = await this.getLockedProductForCheckout(
+        tx,
+        calculation.item.productId,
+      );
+
+      if (
+        lockedProduct.trackInventory &&
+        !lockedProduct.allowNegativeInventory &&
+        calculation.item.quantity > lockedProduct.currentQuantity
+      ) {
+        throw new BadRequestException(
+          `${lockedProduct.name} does not have enough inventory`,
+        );
+      }
+
+      const taxableAmount =
+        lockedProduct.taxStyle === TaxStyle.pre_discount
+          ? calculation.lineSubtotal
+          : Prisma.Decimal.max(
+              calculation.lineSubtotal.minus(calculation.loyaltyDiscount),
+              0,
+            );
+      const taxAmount = this.roundMoney(
+        taxableAmount.mul(lockedProduct.tax.rate),
+      );
+      const discountAmount = this.roundMoney(
+        calculation.itemDiscount.plus(calculation.loyaltyDiscount),
+      );
+      const lineTotal = this.roundMoney(
+        Prisma.Decimal.max(
+          calculation.lineSubtotal
+            .minus(calculation.loyaltyDiscount)
+            .plus(taxAmount),
+          0,
+        ),
+      );
+
+      taxTotal = taxTotal.plus(taxAmount);
+
+      checkoutItems.push({
+        productId: lockedProduct.id,
+        name: lockedProduct.name,
+        barcode: lockedProduct.barcode,
+        quantity: calculation.item.quantity,
+        unitPrice: this.money(calculation.item.unitPrice),
+        lineSubtotal: calculation.lineSubtotal,
+        discountAmount,
+        taxAmount,
+        lineTotal,
+        taxStyle: lockedProduct.taxStyle,
+        allowEbt: lockedProduct.allowEbt,
+        trackInventory: lockedProduct.trackInventory,
+        allowNegativeInventory: lockedProduct.allowNegativeInventory,
+        currentQuantity: lockedProduct.currentQuantity,
+      });
+    }
+
+    taxTotal = this.roundMoney(taxTotal);
+
+    return {
+      valid: true,
+      items: checkoutItems,
+      subtotal,
+      discountTotal: this.roundMoney(
+        itemDiscountTotal.plus(loyaltyDiscountTotal),
+      ),
+      taxTotal,
+      total: this.roundMoney(
+        Prisma.Decimal.max(
+          subtotal.minus(loyaltyDiscountTotal).plus(taxTotal),
+          0,
+        ),
+      ),
+    };
+  }
+
+  private async getLockedProductForCheckout(
+    tx: Prisma.TransactionClient,
+    productId: string,
+  ) {
+    await tx.$executeRaw`SELECT id FROM "Product" WHERE id = ${productId} FOR UPDATE`;
+
+    const product = await tx.product.findUnique({
+      where: { id: productId },
+      include: { tax: true },
+    });
+
+    if (!product?.isActive) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return product;
+  }
+
+  private applyCartLoyaltyDiscounts(
+    cart: CheckoutCart,
+    itemCalculations: CheckoutItemCalculation[],
+    subtotal: Prisma.Decimal,
+  ) {
+    const customerStore = cart.customer?.stores.find(
+      (store) => store.storeId === cart.storeId,
+    );
+    const tier = customerStore?.currentTier;
+
+    if (!tier?.isActive) {
+      return this.money(0);
+    }
+
+    const discountValue = this.money(tier.discountValue);
+    let loyaltyDiscountTotal = this.money(0);
+
+    if (tier.discountModel === 'ORDER_PERCENTAGE') {
+      loyaltyDiscountTotal = subtotal.mul(discountValue).div(100);
+      this.distributeCartLoyaltyDiscount(
+        itemCalculations,
+        loyaltyDiscountTotal,
+      );
+    }
+
+    if (tier.discountModel === 'ORDER_FLAT_RATE') {
+      loyaltyDiscountTotal = Prisma.Decimal.min(discountValue, subtotal);
+      this.distributeCartLoyaltyDiscount(
+        itemCalculations,
+        loyaltyDiscountTotal,
+      );
+    }
+
+    if (tier.discountModel === 'ITEM_PERCENTAGE') {
+      for (const item of itemCalculations) {
+        item.loyaltyDiscount = Prisma.Decimal.min(
+          item.lineSubtotal.mul(discountValue).div(100),
+          item.lineSubtotal,
+        );
+        loyaltyDiscountTotal = loyaltyDiscountTotal.plus(item.loyaltyDiscount);
+      }
+    }
+
+    if (tier.discountModel === 'ITEM_FLAT_RATE') {
+      for (const item of itemCalculations) {
+        item.loyaltyDiscount = Prisma.Decimal.min(
+          discountValue.mul(item.item.quantity),
+          item.lineSubtotal,
+        );
+        loyaltyDiscountTotal = loyaltyDiscountTotal.plus(item.loyaltyDiscount);
+      }
+    }
+
+    for (const item of itemCalculations) {
+      item.loyaltyDiscount = this.roundMoney(item.loyaltyDiscount);
+    }
+
+    return this.roundMoney(Prisma.Decimal.min(loyaltyDiscountTotal, subtotal));
+  }
+
+  private distributeCartLoyaltyDiscount(
+    items: CheckoutItemCalculation[],
+    discount: Prisma.Decimal,
+  ) {
+    const subtotal = items.reduce(
+      (total, item) => total.plus(item.lineSubtotal),
+      this.money(0),
+    );
+
+    if (subtotal.isZero()) {
+      return;
+    }
+
+    let remaining = Prisma.Decimal.min(discount, subtotal);
+
+    items.forEach((item, index) => {
+      if (index === items.length - 1) {
+        item.loyaltyDiscount = Prisma.Decimal.min(remaining, item.lineSubtotal);
+        return;
+      }
+
+      item.loyaltyDiscount = Prisma.Decimal.min(
+        this.roundMoney(discount.mul(item.lineSubtotal).div(subtotal)),
+        item.lineSubtotal,
+      );
+      remaining = remaining.minus(item.loyaltyDiscount);
+    });
+  }
+
   private async validateCustomerForCart(
     tx: Prisma.TransactionClient | PrismaService,
     customerId: string,
@@ -448,6 +701,120 @@ export class TransactionService {
     return customer;
   }
 
+  private async recalculateCustomerTierForStore(
+    tx: Prisma.TransactionClient,
+    customerId: string,
+    storeId: string,
+  ) {
+    const store = await tx.store.findUnique({
+      where: { id: storeId },
+      select: { ownerId: true },
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    const customerStore = await tx.customerStore.findUnique({
+      where: {
+        customerId_storeId: {
+          customerId,
+          storeId,
+        },
+      },
+    });
+
+    if (!customerStore) {
+      throw new NotFoundException('Customer not found for store');
+    }
+
+    const since = this.getPurchaseHistoryCutoff();
+    const [storeSpendResult, ownerSpendResult] = await Promise.all([
+      tx.customerPurchaseHistory.aggregate({
+        where: {
+          customerId,
+          storeId,
+          purchasedAt: { gte: since },
+        },
+        _sum: { totalSpend: true },
+      }),
+      tx.customerPurchaseHistory.aggregate({
+        where: {
+          customerId,
+          store: { ownerId: store.ownerId },
+          purchasedAt: { gte: since },
+        },
+        _sum: { totalSpend: true },
+      }),
+    ]);
+    const storeSpend =
+      storeSpendResult._sum.totalSpend ?? new Prisma.Decimal(0);
+    const ownerSpend =
+      ownerSpendResult._sum.totalSpend ?? new Prisma.Decimal(0);
+    const [storeRule, ownerRule] = await Promise.all([
+      tx.customerTierRule.findFirst({
+        where: {
+          isActive: true,
+          storeId,
+          syncAcrossOwnerStores: false,
+          minimumSpend: { lte: storeSpend },
+        },
+        orderBy: { minimumSpend: 'desc' },
+        include: { tier: true },
+      }),
+      tx.customerTierRule.findFirst({
+        where: {
+          isActive: true,
+          ownerId: store.ownerId,
+          syncAcrossOwnerStores: true,
+          minimumSpend: { lte: ownerSpend },
+        },
+        orderBy: { minimumSpend: 'desc' },
+        include: { tier: true },
+      }),
+    ]);
+    const tierRule =
+      ownerRule &&
+      (!storeRule || ownerRule.minimumSpend.greaterThan(storeRule.minimumSpend))
+        ? ownerRule
+        : storeRule;
+    const tierName = tierRule
+      ? 'tier' in tierRule && tierRule.tier
+        ? tierRule.tier.name
+        : tierRule.name
+      : null;
+
+    if (tierRule?.syncAcrossOwnerStores) {
+      await tx.customerStore.updateMany({
+        where: {
+          customerId,
+          store: { ownerId: store.ownerId },
+        },
+        data: {
+          tier: tierName,
+          currentTierRuleId: tierRule.id,
+          currentTierId: tierRule.tierId,
+        },
+      });
+    } else {
+      await tx.customerStore.update({
+        where: { id: customerStore.id },
+        data: {
+          tier: tierName,
+          currentTierRuleId: tierRule?.id ?? null,
+          currentTierId: tierRule?.tierId ?? null,
+        },
+      });
+    }
+
+    await tx.customer.update({
+      where: { id: customerId },
+      data: {
+        tier: tierRule?.syncAcrossOwnerStores ? tierName : undefined,
+      },
+    });
+  }
+
   private async findTransactionOrThrow(transactionId: string) {
     const transaction = await this.prisma.transaction.findUnique({
       where: { id: transactionId },
@@ -481,7 +848,39 @@ export class TransactionService {
       },
     });
 
-    return `PD-${yyyymmdd}-${String(count + 1).padStart(6, '0')}`;
+    return `${yyyymmdd}-${String(count + 1).padStart(6, '0')}`;
+  }
+
+  private buildCheckoutReceiptData(
+    transaction: TransactionWithRelations,
+    validated: ValidatedCart,
+  ): Prisma.InputJsonObject {
+    return {
+      transactionId: transaction.id,
+      receiptNumber: transaction.receiptNumber,
+      date: transaction.createdAt.toISOString(),
+      store: transaction.store.name,
+      cashier: transaction.staff.name ?? transaction.staff.id,
+      customer: transaction.customer
+        ? `${transaction.customer.firstName} ${transaction.customer.lastName}`
+        : null,
+      items: transaction.items.map((item) => ({
+        productId: item.productId,
+        name: item.nameSnapshot,
+        barcode: item.barcodeSnapshot,
+        quantity: item.quantity,
+        unitPrice: this.moneyToString(item.unitPrice),
+        lineSubtotal: this.moneyToString(item.lineSubtotal),
+        discountAmount: this.moneyToString(item.discountAmount),
+        taxAmount: this.moneyToString(item.taxAmount),
+        lineTotal: this.moneyToString(item.lineTotal),
+      })),
+      subtotal: this.moneyToString(validated.subtotal),
+      discount: this.moneyToString(validated.discountTotal),
+      tax: this.moneyToString(validated.taxTotal),
+      total: this.moneyToString(validated.total),
+      paymentMethod: transaction.paymentMethod,
+    };
   }
 
   private buildReceiptData(
@@ -598,6 +997,15 @@ export class TransactionService {
         taxStyle: item.taxStyle,
         createdAt: item.createdAt,
       })),
+      receipt: transaction.receipt
+        ? {
+            id: transaction.receipt.id,
+            transactionId: transaction.receipt.transactionId,
+            receiptNumber: transaction.receipt.receiptNumber,
+            receiptData: transaction.receipt.receiptData,
+            createdAt: transaction.receipt.createdAt,
+          }
+        : null,
     };
   }
 
@@ -668,6 +1076,19 @@ export class TransactionService {
       ...this.parseCartBody(body),
       paymentMethod,
       notes,
+    };
+  }
+
+  private parseCartCheckoutBody(
+    body: Record<string, unknown>,
+  ): CartCheckoutDto {
+    return {
+      cartId: this.requiredString(body.cartId, 'cartId'),
+      paymentMethod: this.requiredEnum(
+        body.paymentMethod,
+        'paymentMethod',
+        PaymentMethod,
+      ),
     };
   }
 
@@ -803,6 +1224,20 @@ export class TransactionService {
     return value.toFixed(2);
   }
 
+  private getPurchaseHistoryCutoff() {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 60);
+
+    return cutoff;
+  }
+
+  private async lockCart(tx: Prisma.TransactionClient, cartId: string) {
+    await tx.$executeRaw`SELECT id FROM "Cart" WHERE id = ${this.requiredString(
+      cartId,
+      'cartId',
+    )} FOR UPDATE`;
+  }
+
   private isReceiptNumberConflict(error: unknown) {
     return (
       error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -833,7 +1268,31 @@ export class TransactionService {
     items: {
       orderBy: { createdAt: 'asc' },
     },
+    receipt: true,
   } satisfies Prisma.TransactionInclude;
+
+  private readonly checkoutCartInclude = {
+    customer: {
+      include: {
+        stores: {
+          include: {
+            currentTier: true,
+            currentTierRule: true,
+          },
+        },
+      },
+    },
+    items: {
+      orderBy: { createdAt: 'asc' },
+      include: {
+        product: {
+          include: {
+            tax: true,
+          },
+        },
+      },
+    },
+  } satisfies Prisma.CartInclude;
 }
 
 type CartDto = {
@@ -849,6 +1308,11 @@ type CartDto = {
 type CheckoutDto = CartDto & {
   paymentMethod: PaymentMethod;
   notes?: string;
+};
+
+type CartCheckoutDto = {
+  cartId: string;
+  paymentMethod: PaymentMethod;
 };
 
 type ValidatedCartItem = {
@@ -899,5 +1363,39 @@ type TransactionWithRelations = Prisma.TransactionGetPayload<{
     items: {
       orderBy: { createdAt: 'asc' };
     };
+    receipt: true;
   };
 }>;
+
+type CheckoutCart = Prisma.CartGetPayload<{
+  include: {
+    customer: {
+      include: {
+        stores: {
+          include: {
+            currentTier: true;
+            currentTierRule: true;
+          };
+        };
+      };
+    };
+    items: {
+      orderBy: { createdAt: 'asc' };
+      include: {
+        product: {
+          include: {
+            tax: true;
+          };
+        };
+      };
+    };
+  };
+}>;
+
+type CheckoutItemCalculation = {
+  item: CheckoutCart['items'][number];
+  originalSubtotal: Prisma.Decimal;
+  lineSubtotal: Prisma.Decimal;
+  itemDiscount: Prisma.Decimal;
+  loyaltyDiscount: Prisma.Decimal;
+};

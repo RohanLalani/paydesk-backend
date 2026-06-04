@@ -71,60 +71,58 @@ export class CartService {
     dto: { storeId: string; barcode: string; quantity: number },
     user: AuthTokenPayload,
   ) {
-    const cart = await this.getActiveCartForUser(cartId, user);
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockCart(tx, cartId);
 
-    this.ensureCartStore(cart, dto.storeId);
+      const cart = await this.getActiveCartForUser(cartId, user, tx);
 
-    const product = await this.prisma.product.findFirst({
-      where: {
-        storeId: cart.storeId,
-        barcode: dto.barcode,
-        isActive: true,
-      },
-      include: { tax: true },
-    });
+      this.ensureCartStore(cart, dto.storeId);
 
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
-    const existingItem = cart.items.find(
-      (item) => item.productId === product.id,
-    );
-    const nextQuantity = (existingItem?.quantity ?? 0) + dto.quantity;
-
-    this.validateProductQuantity(product, nextQuantity);
-
-    const updateResult = existingItem
-      ? await this.prisma.cartItem.updateMany({
-          where: {
-            id: existingItem.id,
-            quantity:
-              product.trackInventory && !product.allowNegativeInventory
-                ? { lte: product.currentQuantity - dto.quantity }
-                : undefined,
-          },
-          data: {
-            quantity: { increment: dto.quantity },
-          },
-        })
-      : await this.createCartItem(cart.id, product, dto.quantity);
-
-    if (existingItem && updateResult.count !== 1) {
-      throw new BadRequestException(
-        `${product.name} does not have enough inventory`,
+      const product = await this.getLockedProductByBarcode(
+        tx,
+        cart.storeId,
+        dto.barcode,
       );
-    }
 
-    return this.findOne(cart.id, user);
+      const existingItem = cart.items.find(
+        (item) => item.productId === product.id,
+      );
+      const nextQuantity = (existingItem?.quantity ?? 0) + dto.quantity;
+
+      this.validateProductQuantity(product, nextQuantity);
+
+      const updateResult = existingItem
+        ? await tx.cartItem.updateMany({
+            where: {
+              id: existingItem.id,
+              quantity:
+                product.trackInventory && !product.allowNegativeInventory
+                  ? { lte: product.currentQuantity - dto.quantity }
+                  : undefined,
+            },
+            data: {
+              quantity: { increment: dto.quantity },
+            },
+          })
+        : await this.createCartItem(tx, cart.id, product, dto.quantity);
+
+      if (existingItem && updateResult.count !== 1) {
+        throw new BadRequestException(
+          `${product.name} does not have enough inventory`,
+        );
+      }
+
+      return this.toCartResponse(await this.getCartOrThrow(tx, cart.id));
+    });
   }
 
   private async createCartItem(
+    tx: Prisma.TransactionClient,
     cartId: string,
     product: CartProduct,
     quantity: number,
   ) {
-    await this.prisma.cartItem.create({
+    await tx.cartItem.create({
       data: {
         cartId,
         productId: product.id,
@@ -144,17 +142,23 @@ export class CartService {
     user: AuthTokenPayload,
   ) {
     const quantity = this.requiredPositiveInt(body.quantity, 'quantity');
-    const cart = await this.getActiveCartForUser(cartId, user);
-    const item = this.findItemInCart(cart, itemId);
 
-    this.validateProductQuantity(item.product, quantity);
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockCart(tx, cartId);
 
-    await this.prisma.cartItem.update({
-      where: { id: item.id },
-      data: { quantity },
+      const cart = await this.getActiveCartForUser(cartId, user, tx);
+      const item = this.findItemInCart(cart, itemId);
+      const product = await this.getLockedProductById(tx, item.productId);
+
+      this.validateProductQuantity(product, quantity);
+
+      await tx.cartItem.update({
+        where: { id: item.id },
+        data: { quantity },
+      });
+
+      return this.toCartResponse(await this.getCartOrThrow(tx, cart.id));
     });
-
-    return this.findOne(cart.id, user);
   }
 
   async priceOverride(
@@ -174,18 +178,24 @@ export class CartService {
       throw new BadRequestException('reason cannot exceed 500 characters');
     }
 
-    const cart = await this.getActiveCartForUser(cartId, user);
-    const item = this.findItemInCart(cart, itemId);
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockCart(tx, cartId);
 
-    await this.prisma.cartItem.update({
-      where: { id: item.id },
-      data: {
-        unitPrice: dto.price,
-        priceOverrideReason: dto.reason,
-      },
+      const cart = await this.getActiveCartForUser(cartId, user, tx);
+      const item = this.findItemInCart(cart, itemId);
+
+      await this.lockCartItem(tx, item.id);
+
+      await tx.cartItem.update({
+        where: { id: item.id },
+        data: {
+          unitPrice: dto.price,
+          priceOverrideReason: dto.reason,
+        },
+      });
+
+      return this.toCartResponse(await this.getCartOrThrow(tx, cart.id));
     });
-
-    return this.findOne(cart.id, user);
   }
 
   async attachCustomerByPhone(
@@ -194,34 +204,38 @@ export class CartService {
     user: AuthTokenPayload,
   ) {
     const phone = this.requiredString(body.phone, 'phone');
-    const cart = await this.getActiveCartForUser(cartId, user);
-    const customer = await this.prisma.customer.findUnique({
-      where: { phone },
-      include: {
-        stores: {
-          where: { storeId: cart.storeId },
-          include: {
-            currentTier: true,
-            currentTierRule: true,
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockCart(tx, cartId);
+
+      const cart = await this.getActiveCartForUser(cartId, user, tx);
+      const customer = await tx.customer.findUnique({
+        where: { phone },
+        include: {
+          stores: {
+            where: { storeId: cart.storeId },
+            include: {
+              currentTier: true,
+              currentTierRule: true,
+            },
           },
         },
-      },
+      });
+
+      if (!customer) {
+        throw new NotFoundException('Customer not found');
+      }
+
+      if (!customer.stores.length) {
+        throw new ForbiddenException('Customer is not linked to this store');
+      }
+
+      await tx.cart.update({
+        where: { id: cart.id },
+        data: { customerId: customer.id },
+      });
+
+      return this.toCartResponse(await this.getCartOrThrow(tx, cart.id));
     });
-
-    if (!customer) {
-      throw new NotFoundException('Customer not found');
-    }
-
-    if (!customer.stores.length) {
-      throw new ForbiddenException('Customer is not linked to this store');
-    }
-
-    await this.prisma.cart.update({
-      where: { id: cart.id },
-      data: { customerId: customer.id },
-    });
-
-    return this.findOne(cart.id, user);
   }
 
   async findOne(cartId: string, user: AuthTokenPayload) {
@@ -231,43 +245,48 @@ export class CartService {
   }
 
   async preparePayment(cartId: string, user: AuthTokenPayload) {
-    const cart = await this.getActiveCartForUser(cartId, user);
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockCart(tx, cartId);
 
-    if (!cart.items.length) {
-      throw new BadRequestException('Cart is empty');
-    }
+      const cart = await this.getActiveCartForUser(cartId, user, tx);
 
-    this.validateCartQuantities(cart);
+      if (!cart.items.length) {
+        throw new BadRequestException('Cart is empty');
+      }
 
-    const updated = await this.prisma.cart.update({
-      where: { id: cart.id },
-      data: { status: CartStatus.ready_for_payment },
-      include: this.cartInclude,
+      await this.validateCartQuantities(tx, cart);
+
+      const updated = await tx.cart.update({
+        where: { id: cart.id },
+        data: { status: CartStatus.ready_for_payment },
+        include: this.cartInclude,
+      });
+
+      return {
+        ...this.toCartResponse(updated),
+        paymentStatus: 'ready_for_payment',
+      };
     });
-
-    return {
-      ...this.toCartResponse(updated),
-      paymentStatus: 'ready_for_payment',
-    };
   }
 
-  private async getCartForUser(cartId: string, user: AuthTokenPayload) {
-    const cart = await this.prisma.cart.findUnique({
-      where: { id: this.requiredString(cartId, 'cartId') },
-      include: this.cartInclude,
-    });
-
-    if (!cart) {
-      throw new NotFoundException('Cart not found');
-    }
+  private async getCartForUser(
+    cartId: string,
+    user: AuthTokenPayload,
+    tx: CartPrismaClient = this.prisma,
+  ) {
+    const cart = await this.getCartOrThrow(tx, cartId);
 
     await this.access.ensureStoreAccess(cart.storeId, user, 'view_store');
 
     return cart;
   }
 
-  private async getActiveCartForUser(cartId: string, user: AuthTokenPayload) {
-    const cart = await this.getCartForUser(cartId, user);
+  private async getActiveCartForUser(
+    cartId: string,
+    user: AuthTokenPayload,
+    tx: CartPrismaClient = this.prisma,
+  ) {
+    const cart = await this.getCartForUser(cartId, user, tx);
 
     if (cart.status !== CartStatus.active) {
       throw new BadRequestException('Cart is not active');
@@ -304,9 +323,13 @@ export class CartService {
     }
   }
 
-  private validateCartQuantities(cart: CartWithRelations) {
+  private async validateCartQuantities(
+    tx: Prisma.TransactionClient,
+    cart: CartWithRelations,
+  ) {
     for (const item of cart.items) {
-      this.validateProductQuantity(item.product, item.quantity);
+      const product = await this.getLockedProductById(tx, item.productId);
+      this.validateProductQuantity(product, item.quantity);
     }
   }
 
@@ -536,6 +559,76 @@ export class CartService {
     );
   }
 
+  private async getCartOrThrow(tx: CartPrismaClient, cartId: string) {
+    const cart = await tx.cart.findUnique({
+      where: { id: this.requiredString(cartId, 'cartId') },
+      include: this.cartInclude,
+    });
+
+    if (!cart) {
+      throw new NotFoundException('Cart not found');
+    }
+
+    return cart;
+  }
+
+  private async getLockedProductByBarcode(
+    tx: Prisma.TransactionClient,
+    storeId: string,
+    barcode: string,
+  ) {
+    const product = await tx.product.findFirst({
+      where: {
+        storeId,
+        barcode,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return this.getLockedProductById(tx, product.id);
+  }
+
+  private async getLockedProductById(
+    tx: Prisma.TransactionClient,
+    productId: string,
+  ) {
+    await this.lockProduct(tx, productId);
+
+    const product = await tx.product.findUnique({
+      where: { id: productId },
+      include: { tax: true },
+    });
+
+    if (!product?.isActive) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return product;
+  }
+
+  private async lockCart(tx: Prisma.TransactionClient, cartId: string) {
+    await tx.$executeRaw`SELECT id FROM "Cart" WHERE id = ${this.requiredString(
+      cartId,
+      'cartId',
+    )} FOR UPDATE`;
+  }
+
+  private async lockCartItem(tx: Prisma.TransactionClient, itemId: string) {
+    await tx.$executeRaw`SELECT id FROM "CartItem" WHERE id = ${this.requiredString(
+      itemId,
+      'itemId',
+    )} FOR UPDATE`;
+  }
+
+  private async lockProduct(tx: Prisma.TransactionClient, productId: string) {
+    await tx.$executeRaw`SELECT id FROM "Product" WHERE id = ${productId} FOR UPDATE`;
+  }
+
   private requiredString(value: unknown, field: string) {
     if (typeof value !== 'string' || !value.trim()) {
       throw new BadRequestException(`${field} is required`);
@@ -661,3 +754,5 @@ type CartProduct = Prisma.ProductGetPayload<{
     tax: true;
   };
 }>;
+
+type CartPrismaClient = Prisma.TransactionClient | PrismaService;
