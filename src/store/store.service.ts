@@ -8,6 +8,7 @@ import {
   BillingCycle,
   Prisma,
   StaffRole,
+  StoreBusinessType,
   SubscriptionStatus,
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
@@ -133,6 +134,7 @@ export class StoreService {
         data: {
           name: dto.name,
           address: dto.address,
+          businessType: dto.businessType,
           ownerId: user.accountId,
         },
         include: this.storeInclude,
@@ -215,6 +217,7 @@ export class StoreService {
     return {
       name: this.requiredString(body.name, 'name'),
       address: this.optionalString(body.address, 'address'),
+      businessType: this.requiredBusinessType(body.businessType),
     };
   }
 
@@ -231,9 +234,13 @@ export class StoreService {
       updates.address = this.optionalString(body.address, 'address');
     }
 
+    if (body.businessType !== undefined) {
+      updates.businessType = this.requiredBusinessType(body.businessType);
+    }
+
     if (!Object.keys(updates).length) {
       throw new BadRequestException(
-        'At least one of name or address is required',
+        'At least one of name, address, or businessType is required',
       );
     }
 
@@ -258,6 +265,20 @@ export class StoreService {
     }
 
     return value.trim() || null;
+  }
+
+  private requiredBusinessType(value: unknown) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new BadRequestException('businessType is required');
+    }
+
+    if (!Object.values(StoreBusinessType).includes(value as StoreBusinessType)) {
+      throw new BadRequestException(
+        'businessType must be a valid store business type',
+      );
+    }
+
+    return value as StoreBusinessType;
   }
 
   private getTierPrice(activeStoreCount: number, billingCycle: BillingCycle) {
