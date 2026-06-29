@@ -41,10 +41,15 @@ export class AuthService {
       name: dto.name,
       password,
     });
-    await this.createAndSendEmailVerification(type, account);
+    const emailVerificationSent = await this.createAndSendEmailVerification(
+      type,
+      account,
+    );
 
     return {
-      message: `${this.label(type)} registered successfully. Please verify your email before logging in.`,
+      message: emailVerificationSent
+        ? `${this.label(type)} registered successfully. Please verify your email before logging in.`
+        : `${this.label(type)} registered successfully, but we could not send the verification email. Please contact support to verify your account.`,
       account: this.toSafeAccount(type, account),
     };
   }
@@ -117,8 +122,18 @@ export class AuthService {
     let account = await this.updateAccount(type, id, existing.staffId, updates);
 
     if (updates.email !== undefined) {
-      await this.createAndSendEmailVerification(type, account);
+      const emailVerificationSent = await this.createAndSendEmailVerification(
+        type,
+        account,
+      );
       account = (await this.findAccountById(type, id)) ?? account;
+
+      return {
+        message: emailVerificationSent
+          ? `${this.label(type)} updated successfully`
+          : `${this.label(type)} updated successfully, but we could not send the verification email. Please contact support to verify your account.`,
+        account: this.toSafeAccount(type, account),
+      };
     }
 
     return {
@@ -632,11 +647,15 @@ export class AuthService {
         verificationUrl: this.buildEmailVerificationUrl(token, type),
         type,
       });
+
+      return true;
     } catch (error) {
       this.logger.error(
         `Failed to send ${type} email verification email`,
         error instanceof Error ? error.stack : undefined,
       );
+
+      return false;
     }
   }
 
