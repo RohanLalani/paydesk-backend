@@ -1,18 +1,23 @@
 import {
   Injectable,
   Logger,
+  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
 
 @Injectable()
-export class EmailService {
+export class EmailService implements OnModuleInit {
   private readonly logger = new Logger(EmailService.name);
   private resend?: Resend;
   private emailConfig?: EmailConfig;
 
   constructor(private readonly configService: ConfigService) {}
+
+  onModuleInit() {
+    this.logStartupEmailEnvironment();
+  }
 
   async sendPasswordResetEmail(params: {
     to: string;
@@ -99,6 +104,7 @@ export class EmailService {
         'Email environment:',
         'provider=resend',
         `RESEND_API_KEY=${this.exists(apiKey)}`,
+        `RESEND_API_KEY_LENGTH=${apiKey?.length ?? 0}`,
         `EMAIL_FROM=${this.exists(emailFromValue)}`,
         `SMTP_FROM=${this.exists(smtpFromValue)}`,
       ].join(' '),
@@ -151,6 +157,23 @@ export class EmailService {
 
     const maybeMessage = (error as { message?: unknown })?.message;
     return typeof maybeMessage === 'string' ? maybeMessage : '(none)';
+  }
+
+  private logStartupEmailEnvironment() {
+    const nodeEnv = this.optionalEnv('NODE_ENV') ?? '(unset)';
+    const apiKey = this.optionalEnv('RESEND_API_KEY');
+    const emailFrom = this.optionalEnv('EMAIL_FROM');
+
+    this.logger.log(
+      [
+        'Email startup config:',
+        'provider=resend',
+        `NODE_ENV=${nodeEnv}`,
+        `RESEND_API_KEY=${this.exists(apiKey)}`,
+        `RESEND_API_KEY_LENGTH=${apiKey?.length ?? 0}`,
+        `EMAIL_FROM=${this.exists(emailFrom)}`,
+      ].join(' '),
+    );
   }
 
   private optionalEnv(key: string) {
