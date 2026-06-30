@@ -5,8 +5,10 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma, StaffRole } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -29,6 +31,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly emailService: EmailService,
+    private readonly configService: ConfigService,
   ) {}
 
   async register(type: AccountType, body: Record<string, unknown>) {
@@ -673,12 +676,36 @@ export class AuthService {
   }
 
   private buildEmailVerificationUrl(token: string, type: AccountType) {
-    const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:3000';
+    const frontendUrl = this.getBackofficeFrontendUrl();
     const url = new URL('/verify-email', frontendUrl);
     url.searchParams.set('token', token);
     url.searchParams.set('type', type);
 
+    this.logger.log(
+      `Email verification frontend URL resolved base=${frontendUrl} type=${type}`,
+    );
+
     return url.toString();
+  }
+
+  private getBackofficeFrontendUrl() {
+    const configuredUrl = this.optionalConfigString('BACKOFFICE_FRONTEND_URL');
+    const nodeEnv = this.optionalConfigString('NODE_ENV') ?? '(unset)';
+
+    if (configuredUrl) {
+      return configuredUrl;
+    }
+
+    if (nodeEnv === 'development') {
+      this.logger.warn(
+        'BACKOFFICE_FRONTEND_URL is missing; using development fallback http://localhost:3000',
+      );
+      return 'http://localhost:3000';
+    }
+
+    throw new ServiceUnavailableException(
+      'Backoffice frontend URL is not configured',
+    );
   }
 
   private toSafeAccount(type: AccountType, account: AccountWithStaff) {
@@ -724,6 +751,11 @@ export class AuthService {
     }
 
     return value.trim() || null;
+  }
+
+  private optionalConfigString(key: string) {
+    const value = this.configService.get<string>(key);
+    return value?.trim() || undefined;
   }
 
   private label(type: AccountType) {

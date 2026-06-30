@@ -39,6 +39,7 @@ environment:
 ```bash
 RESEND_API_KEY=re_xxxxxxxxxxxxxxxxx
 EMAIL_FROM="PayDesk <onboarding@resend.dev>"
+BACKOFFICE_FRONTEND_URL="https://your-backoffice-frontend-url"
 ```
 
 For production, use a verified sender domain, for example:
