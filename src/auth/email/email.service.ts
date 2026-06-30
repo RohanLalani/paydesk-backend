@@ -161,6 +161,7 @@ export class EmailService implements OnModuleInit {
 
   private logStartupEmailEnvironment() {
     const nodeEnv = this.optionalEnv('NODE_ENV') ?? '(unset)';
+    const testEnvCheck = this.optionalEnv('TEST_ENV_CHECK');
     const apiKey = this.optionalEnv('RESEND_API_KEY');
     const emailFrom = this.optionalEnv('EMAIL_FROM');
 
@@ -169,6 +170,7 @@ export class EmailService implements OnModuleInit {
         'Email startup config:',
         'provider=resend',
         `NODE_ENV=${nodeEnv}`,
+        `TEST_ENV_CHECK=${this.exists(testEnvCheck)}`,
         `RESEND_API_KEY=${this.exists(apiKey)}`,
         `RESEND_API_KEY_LENGTH=${apiKey?.length ?? 0}`,
         `EMAIL_FROM=${this.exists(emailFrom)}`,
