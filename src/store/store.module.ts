@@ -7,5 +7,6 @@ import { StoreService } from './store.service';
 @Module({
   controllers: [StoreController],
   providers: [StoreService, PrismaService, PosAccessService],
+  exports: [StoreService],
 })
 export class StoreModule {}

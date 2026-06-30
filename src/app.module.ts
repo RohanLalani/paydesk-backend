@@ -5,6 +5,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
+import { BillingModule } from './billing/billing.module';
 import { CartModule } from './cart/cart.module';
 import { PrismaExceptionFilter } from './common/prisma-exception.filter';
 import { CustomerModule } from './customer/customer.module';
@@ -27,6 +28,7 @@ import { TransactionModule } from './transaction/transaction.module';
       },
     ]),
     AuthModule,
+    BillingModule,
     CartModule,
     CustomerModule,
     DashboardModule,

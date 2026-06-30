@@ -5,10 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
-  BillingCycle,
   Prisma,
   StaffRole,
   StoreBusinessType,
+  SubscriptionPlan,
   SubscriptionStatus,
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
@@ -22,28 +22,18 @@ export class StoreService {
     private readonly access: PosAccessService,
   ) {}
 
-  calculateStorePricing(activeStoreCount: number, billingCycle: BillingCycle) {
+  calculateStorePricing(activeStoreCount: number, plan: SubscriptionPlan) {
     if (activeStoreCount < 0) {
       throw new BadRequestException('activeStoreCount cannot be negative');
     }
 
-    const monthlyPricePerStore =
-      activeStoreCount === 0
-        ? 0
-        : this.getTierPrice(activeStoreCount, BillingCycle.monthly);
-    const annualPricePerStore =
-      activeStoreCount === 0
-        ? 0
-        : this.getTierPrice(activeStoreCount, BillingCycle.annual);
+    const monthlyPricePerStore = this.getPlanMonthlyPrice(plan);
 
     return {
       activeStoreCount,
-      pricePerStore:
-        billingCycle === BillingCycle.annual
-          ? annualPricePerStore
-          : monthlyPricePerStore,
+      pricePerStore: monthlyPricePerStore,
       totalMonthlyAmount: activeStoreCount * monthlyPricePerStore,
-      totalAnnualAmount: activeStoreCount * annualPricePerStore,
+      totalAnnualAmount: activeStoreCount * monthlyPricePerStore * 12,
     };
   }
 
@@ -103,7 +93,7 @@ export class StoreService {
     const activeStoreCount = await this.getActiveStoreCount(ownerId, tx);
     const pricing = this.calculateStorePricing(
       activeStoreCount,
-      subscription.billingCycle,
+      subscription.plan,
     );
 
     return tx.subscription.update({
@@ -112,14 +102,71 @@ export class StoreService {
     });
   }
 
+  async getOwnerSubscription(user: AuthTokenPayload) {
+    this.assertOwner(user);
+
+    const subscription = await this.prisma.subscription.findFirst({
+      where: this.activeSubscriptionWhere(user.accountId),
+      orderBy: { createdAt: 'desc' },
+      include: { addons: true },
+    });
+
+    if (!subscription) {
+      throw new NotFoundException('Active or trial subscription not found');
+    }
+
+    const activeStoreCount = await this.getActiveStoreCount(user.accountId);
+    const pricing = this.calculateStorePricing(
+      activeStoreCount,
+      subscription.plan,
+    );
+
+    return {
+      ...subscription,
+      ...pricing,
+    };
+  }
+
+  async updateSubscriptionPlan(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    this.assertOwner(user);
+    const plan = this.requiredSubscriptionPlan(body.plan);
+
+    return this.prisma.$transaction(async (tx) => {
+      const subscription = await tx.subscription.findFirst({
+        where: this.activeSubscriptionWhere(user.accountId),
+        orderBy: { createdAt: 'desc' },
+      });
+
+      if (!subscription) {
+        throw new NotFoundException('Active or trial subscription not found');
+      }
+
+      const activeStoreCount = await this.getActiveStoreCount(
+        user.accountId,
+        tx,
+      );
+      const pricing = this.calculateStorePricing(activeStoreCount, plan);
+
+      return tx.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          plan,
+          ...pricing,
+        },
+        include: { addons: true },
+      });
+    });
+  }
+
   async assertCanManageStore(user: AuthTokenPayload, storeId: string) {
     return this.access.ensureStoreAccess(storeId, user, 'edit_store');
   }
 
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {
-    if (user.type !== StaffRole.owner) {
-      throw new ForbiddenException('Only owners can create stores');
-    }
+    this.assertOwner(user, 'Only owners can create stores');
 
     const dto = this.parseCreateBody(body);
 
@@ -272,7 +319,9 @@ export class StoreService {
       throw new BadRequestException('businessType is required');
     }
 
-    if (!Object.values(StoreBusinessType).includes(value as StoreBusinessType)) {
+    if (
+      !Object.values(StoreBusinessType).includes(value as StoreBusinessType)
+    ) {
       throw new BadRequestException(
         'businessType must be a valid store business type',
       );
@@ -281,16 +330,13 @@ export class StoreService {
     return value as StoreBusinessType;
   }
 
-  private getTierPrice(activeStoreCount: number, billingCycle: BillingCycle) {
-    if (activeStoreCount <= 2) {
-      return billingCycle === BillingCycle.annual ? 300 : 30;
+  getPlanMonthlyPrice(plan: SubscriptionPlan) {
+    switch (plan) {
+      case SubscriptionPlan.plus:
+        return 50;
+      case SubscriptionPlan.advanced:
+        return 80;
     }
-
-    if (activeStoreCount <= 10) {
-      return billingCycle === BillingCycle.annual ? 250 : 25;
-    }
-
-    return billingCycle === BillingCycle.annual ? 200 : 20;
   }
 
   private activeSubscriptionWhere(
@@ -314,6 +360,27 @@ export class StoreService {
         },
       ],
     };
+  }
+
+  private assertOwner(
+    user: AuthTokenPayload,
+    message = 'Only owners can manage billing',
+  ) {
+    if (user.type !== StaffRole.owner) {
+      throw new ForbiddenException(message);
+    }
+  }
+
+  private requiredSubscriptionPlan(value: unknown) {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new BadRequestException('plan is required');
+    }
+
+    if (!Object.values(SubscriptionPlan).includes(value as SubscriptionPlan)) {
+      throw new BadRequestException('plan must be plus or advanced');
+    }
+
+    return value as SubscriptionPlan;
   }
 
   private readonly storeInclude = {

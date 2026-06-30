@@ -1,9 +1,10 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return */
 import { BadRequestException } from '@nestjs/common';
 import {
   BillingCycle,
   StaffRole,
   StoreBusinessType,
+  SubscriptionPlan,
   SubscriptionStatus,
 } from '@prisma/client';
 import { PosAccessService } from '../common/pos-access.service';
@@ -99,6 +100,102 @@ describe('StoreService businessType', () => {
     );
     expect(result.businessType).toBe(StoreBusinessType.grocery_store);
   });
+
+  it.each([
+    [SubscriptionPlan.plus, 1, 50, 50, 600],
+    [SubscriptionPlan.plus, 2, 50, 100, 1200],
+    [SubscriptionPlan.plus, 7, 50, 350, 4200],
+    [SubscriptionPlan.advanced, 1, 80, 80, 960],
+    [SubscriptionPlan.advanced, 2, 80, 160, 1920],
+    [SubscriptionPlan.advanced, 7, 80, 560, 6720],
+  ])(
+    'calculates %s monthly billing for %i active stores',
+    (plan, activeStoreCount, pricePerStore, monthlyTotal, annualTotal) => {
+      expect(service.calculateStorePricing(activeStoreCount, plan)).toEqual({
+        activeStoreCount,
+        pricePerStore,
+        totalMonthlyAmount: monthlyTotal,
+        totalAnnualAmount: annualTotal,
+      });
+    },
+  );
+
+  it('calculates annual billing from monthly plan price', () => {
+    expect(service.calculateStorePricing(3, SubscriptionPlan.advanced)).toEqual(
+      {
+        activeStoreCount: 3,
+        pricePerStore: 80,
+        totalMonthlyAmount: 240,
+        totalAnnualAmount: 2880,
+      },
+    );
+  });
+
+  it('recalculates subscription totals when creating a store', async () => {
+    prisma.store.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+
+    await service.create(
+      {
+        name: 'Downtown Store',
+        businessType: StoreBusinessType.convenience_store,
+      },
+      ownerUser,
+    );
+
+    expect(prisma.subscription.update).toHaveBeenCalledWith({
+      where: { id: 'subscription-1' },
+      data: {
+        activeStoreCount: 1,
+        pricePerStore: 50,
+        totalMonthlyAmount: 50,
+        totalAnnualAmount: 600,
+      },
+    });
+  });
+
+  it('recalculates subscription totals when deleting a store', async () => {
+    prisma.store.count.mockResolvedValue(2);
+    prisma.store.update.mockResolvedValue(storeFixture({ isActive: false }));
+
+    await service.remove('store-1', ownerUser);
+
+    expect(prisma.store.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'store-1' },
+        data: { isActive: false },
+      }),
+    );
+    expect(prisma.subscription.update).toHaveBeenCalledWith({
+      where: { id: 'subscription-1' },
+      data: {
+        activeStoreCount: 2,
+        pricePerStore: 50,
+        totalMonthlyAmount: 100,
+        totalAnnualAmount: 1200,
+      },
+    });
+  });
+
+  it('changing plan recalculates subscription totals', async () => {
+    prisma.store.count.mockResolvedValue(3);
+
+    await service.updateSubscriptionPlan(
+      { plan: SubscriptionPlan.advanced },
+      ownerUser,
+    );
+
+    expect(prisma.subscription.update).toHaveBeenCalledWith({
+      where: { id: 'subscription-1' },
+      data: {
+        plan: SubscriptionPlan.advanced,
+        activeStoreCount: 3,
+        pricePerStore: 80,
+        totalMonthlyAmount: 240,
+        totalAnnualAmount: 2880,
+      },
+      include: { addons: true },
+    });
+  });
 });
 
 function createMockPrisma(): MockPrisma {
@@ -107,16 +204,27 @@ function createMockPrisma(): MockPrisma {
       findFirst: jest.fn().mockResolvedValue({
         id: 'subscription-1',
         status: SubscriptionStatus.active,
+        plan: SubscriptionPlan.plus,
         billingCycle: BillingCycle.monthly,
         maxStores: null,
       }),
-      update: jest.fn(),
+      update: jest.fn().mockImplementation(({ data }) =>
+        Promise.resolve({
+          id: 'subscription-1',
+          status: SubscriptionStatus.active,
+          plan: data.plan ?? SubscriptionPlan.plus,
+          billingCycle: BillingCycle.monthly,
+          maxStores: null,
+          addons: [],
+          ...data,
+        }),
+      ),
     },
     store: {
       count: jest.fn().mockResolvedValue(0),
-      create: jest.fn().mockImplementation(({ data }) =>
-        Promise.resolve(storeFixture(data)),
-      ),
+      create: jest
+        .fn()
+        .mockImplementation(({ data }) => Promise.resolve(storeFixture(data))),
       update: jest.fn(),
     },
     $transaction: jest.fn((callback) => callback(prisma)),
