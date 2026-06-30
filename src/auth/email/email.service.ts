@@ -4,14 +4,13 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createTransport, Transporter } from 'nodemailer';
-import SMTPTransport from 'nodemailer/lib/smtp-transport';
+import { Resend } from 'resend';
 
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
-  private transporter?: Transporter;
-  private smtpConfig?: SmtpConfig;
+  private resend?: Resend;
+  private emailConfig?: EmailConfig;
 
   constructor(private readonly configService: ConfigService) {}
 
@@ -25,6 +24,7 @@ export class EmailService {
       to: params.to,
       subject: 'Reset your Pay Desk password',
       html: this.renderPasswordResetTemplate(params),
+      text: this.renderPasswordResetText(params),
     });
   }
 
@@ -38,6 +38,7 @@ export class EmailService {
       to: params.to,
       subject: 'Verify your Pay Desk email',
       html: this.renderEmailVerificationTemplate(params),
+      text: this.renderEmailVerificationText(params),
     });
   }
 
@@ -45,251 +46,116 @@ export class EmailService {
     to: string;
     subject: string;
     html: string;
+    text: string;
   }) {
-    const transporter = this.getTransporter();
-    const config = this.getSmtpConfig();
-
-    await this.verifyTransporter(transporter, config);
+    const resend = this.getResendClient();
+    const config = this.getEmailConfig();
 
     try {
-      await transporter.sendMail({
+      this.logger.log(
+        `Email send requested provider=resend from=${config.from} to=${message.to}`,
+      );
+      const result = await resend.emails.send({
         from: config.from,
         ...message,
       });
+
+      if (result.error) {
+        throw result.error;
+      }
+
+      this.logger.log(
+        `Email send succeeded provider=resend from=${config.from} to=${message.to} id=${result.data?.id ?? '(none)'}`,
+      );
     } catch (error) {
-      this.logSmtpError('SMTP send failed', error, config);
-      throw error;
+      this.logResendError('Resend email send failed', error, config, {
+        to: message.to,
+      });
+      throw new ServiceUnavailableException('Email service failed to send');
     }
   }
 
-  private getTransporter() {
-    if (!this.transporter) {
-      const config = this.getSmtpConfig();
-
-      const transportOptions: SMTPTransport.Options = {
-        host: config.host,
-        port: config.port,
-        secure: config.secure,
-        auth: {
-          user: config.user,
-          pass: config.pass,
-        },
-        connectionTimeout: config.connectionTimeout,
-        greetingTimeout: config.greetingTimeout,
-        socketTimeout: config.socketTimeout,
-        dnsTimeout: config.dnsTimeout,
-      };
-
-      this.transporter = createTransport(transportOptions);
+  private getResendClient() {
+    if (!this.resend) {
+      const config = this.getEmailConfig();
+      this.resend = new Resend(config.apiKey);
     }
 
-    return this.transporter;
+    return this.resend;
   }
 
-  private getSmtpConfig() {
-    if (this.smtpConfig) {
-      return this.smtpConfig;
+  private getEmailConfig() {
+    if (this.emailConfig) {
+      return this.emailConfig;
     }
 
-    const host = this.optionalEnv('SMTP_HOST');
-    const portValue = this.optionalEnv('SMTP_PORT');
-    const user = this.optionalEnv('SMTP_USER');
-    const pass = this.optionalEnv('SMTP_PASS');
-    const fromValue = this.optionalEnv('SMTP_FROM');
-    const from = fromValue ?? user;
-    const smtpSecureValue = this.optionalEnv('SMTP_SECURE');
-    const port = this.parsePort(portValue);
-    const configuredSecure = this.parseOptionalBoolean(smtpSecureValue);
-    const secure = port === 465;
+    const apiKey = this.optionalEnv('RESEND_API_KEY');
+    const emailFromValue = this.optionalEnv('EMAIL_FROM');
+    const smtpFromValue = this.optionalEnv('SMTP_FROM');
+    const from = emailFromValue ?? smtpFromValue;
 
-    this.logSmtpEnvironment({
-      host,
-      port,
-      user,
-      pass,
-      from,
-      fromValue,
-      portValue,
-      smtpSecureValue,
-      configuredSecure,
-      secure,
-    });
+    this.logger.log(
+      [
+        'Email environment:',
+        'provider=resend',
+        `RESEND_API_KEY=${this.exists(apiKey)}`,
+        `EMAIL_FROM=${this.exists(emailFromValue)}`,
+        `SMTP_FROM=${this.exists(smtpFromValue)}`,
+      ].join(' '),
+    );
+    this.logger.log(
+      [
+        'Resolved email config:',
+        'provider=resend',
+        `from=${from ?? '(missing)'}`,
+      ].join(' '),
+    );
 
-    if (!host || !user || !pass || !from) {
+    if (!apiKey || !from) {
+      this.logger.error(
+        `Email service is not configured provider=resend RESEND_API_KEY=${this.exists(apiKey)} EMAIL_FROM=${this.exists(emailFromValue)} SMTP_FROM=${this.exists(smtpFromValue)}`,
+      );
       throw new ServiceUnavailableException('Email service is not configured');
     }
 
-    if (configuredSecure !== undefined && configuredSecure !== secure) {
-      this.logger.warn(
-        `SMTP_SECURE=${configuredSecure} conflicts with SMTP_PORT=${port}; using secure=${secure} because Nodemailer should use secure=true only for port 465`,
-      );
-    }
-
-    this.smtpConfig = {
-      host,
-      port,
-      user,
-      pass,
-      from,
-      secure,
-      connectionTimeout: 15_000,
-      greetingTimeout: 15_000,
-      socketTimeout: 30_000,
-      dnsTimeout: 10_000,
-    };
-
-    return this.smtpConfig;
+    this.emailConfig = { apiKey, from };
+    return this.emailConfig;
   }
 
-  private async verifyTransporter(
-    transporter: Transporter,
-    config: SmtpConfig,
+  private logResendError(
+    message: string,
+    error: unknown,
+    config: EmailConfig,
+    context: { to: string },
   ) {
-    try {
-      await transporter.verify();
-      this.logger.log(
-        `SMTP transporter verified for host=${config.host} port=${config.port} secure=${config.secure} from=${config.from}`,
-      );
-    } catch (error) {
-      this.logSmtpError('SMTP transporter verification failed', error, config);
-      throw error;
-    }
-  }
-
-  private logSmtpEnvironment(params: {
-    host?: string;
-    port: number;
-    user?: string;
-    pass?: string;
-    from?: string;
-    fromValue?: string;
-    portValue?: string;
-    smtpSecureValue?: string;
-    configuredSecure?: boolean;
-    secure: boolean;
-  }) {
-    this.logger.log(
-      [
-        'SMTP environment:',
-        `SMTP_HOST=${this.exists(params.host)}`,
-        `SMTP_PORT=${this.exists(params.portValue)}`,
-        `SMTP_USER=${this.exists(params.user)}`,
-        `SMTP_PASS=${this.exists(params.pass)}`,
-        `SMTP_FROM=${this.exists(params.fromValue)}`,
-        `SMTP_SECURE=${this.exists(params.smtpSecureValue)}`,
-      ].join(' '),
-    );
-    this.logger.log(
-      [
-        'Resolved SMTP config:',
-        `host=${params.host ?? '(missing)'}`,
-        `port=${params.port}`,
-        `secure=${params.secure}`,
-        `smtpSecureEnv=${params.configuredSecure ?? '(unset)'}`,
-        `from=${params.from ?? '(missing)'}`,
-        'authUserPresent=' + this.exists(params.user),
-        'authPassPresent=' + this.exists(params.pass),
-        'pool=false',
-        'connectionTimeout=15000',
-        'greetingTimeout=15000',
-        'socketTimeout=30000',
-        'dnsTimeout=10000',
-      ].join(' '),
-    );
-  }
-
-  private logSmtpError(message: string, error: unknown, config: SmtpConfig) {
-    const smtpError = error as SmtpError;
-    const classification = this.classifySmtpError(error);
+    const resendError = error as ResendError;
 
     this.logger.error(
       [
         message,
-        `classification=${classification}`,
-        `host=${config.host}`,
-        `port=${config.port}`,
-        `secure=${config.secure}`,
+        'provider=resend',
         `from=${config.from}`,
-        `code=${smtpError?.code ?? '(none)'}`,
-        `command=${smtpError?.command ?? '(none)'}`,
-        `responseCode=${smtpError?.responseCode ?? '(none)'}`,
-        `syscall=${smtpError?.syscall ?? '(none)'}`,
+        `to=${context.to}`,
+        `name=${resendError?.name ?? '(none)'}`,
+        `statusCode=${resendError?.statusCode ?? '(none)'}`,
+        `message=${this.safeErrorMessage(error)}`,
       ].join(' '),
       error instanceof Error ? error.stack : undefined,
     );
   }
 
-  private classifySmtpError(error: unknown): SmtpErrorClassification {
-    if (error instanceof ServiceUnavailableException) {
-      return 'invalid configuration';
+  private safeErrorMessage(error: unknown) {
+    if (error instanceof Error) {
+      return error.message;
     }
 
-    const smtpError = error as SmtpError;
-    const code = smtpError?.code;
-    const responseCode = smtpError?.responseCode;
-    const message = error instanceof Error ? error.message.toLowerCase() : '';
-
-    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'EDNS') {
-      return 'DNS failure';
-    }
-
-    if (code === 'ETIMEDOUT' || message.includes('timeout')) {
-      return 'connection timeout';
-    }
-
-    if (responseCode === 535 || responseCode === 534 || responseCode === 530) {
-      return 'authentication failure';
-    }
-
-    if (
-      code === 'ETLS' ||
-      code === 'ESOCKET' ||
-      message.includes('certificate') ||
-      message.includes('tls') ||
-      message.includes('ssl')
-    ) {
-      return 'TLS failure';
-    }
-
-    if (
-      error instanceof Error &&
-      (error.name.includes('Config') || message.includes('configured'))
-    ) {
-      return 'invalid configuration';
-    }
-
-    return 'unknown SMTP failure';
+    const maybeMessage = (error as { message?: unknown })?.message;
+    return typeof maybeMessage === 'string' ? maybeMessage : '(none)';
   }
 
   private optionalEnv(key: string) {
     const value = this.configService.get<string>(key);
     return value?.trim() || undefined;
-  }
-
-  private parsePort(value?: string) {
-    const port = Number(value ?? 587);
-
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new ServiceUnavailableException('Email service is not configured');
-    }
-
-    return port;
-  }
-
-  private parseOptionalBoolean(value?: string) {
-    if (value === undefined) {
-      return undefined;
-    }
-
-    if (/^(true|1|yes)$/i.test(value)) {
-      return true;
-    }
-
-    if (/^(false|0|no)$/i.test(value)) {
-      return false;
-    }
-
-    throw new ServiceUnavailableException('Email service is not configured');
   }
 
   private exists(value?: string) {
@@ -350,6 +216,42 @@ export class EmailService {
     `;
   }
 
+  private renderPasswordResetText(params: {
+    name?: string | null;
+    resetUrl: string;
+    type: string;
+  }) {
+    const greeting = params.name ? `Hi ${params.name},` : 'Hi,';
+
+    return [
+      'Reset your Pay Desk password',
+      '',
+      greeting,
+      `We received a request to reset the password for your ${params.type} account.`,
+      `Reset password: ${params.resetUrl}`,
+      'This link expires in 15 minutes and can only be used once.',
+      'If you did not request this, you can ignore this email.',
+    ].join('\n');
+  }
+
+  private renderEmailVerificationText(params: {
+    name?: string | null;
+    verificationUrl: string;
+    type: string;
+  }) {
+    const greeting = params.name ? `Hi ${params.name},` : 'Hi,';
+
+    return [
+      'Verify your Pay Desk email',
+      '',
+      greeting,
+      `Please verify the email address for your ${params.type} account.`,
+      `Verify email: ${params.verificationUrl}`,
+      'This link expires in 24 hours and can only be used once.',
+      'If you did not create this account, you can ignore this email.',
+    ].join('\n');
+  }
+
   private escapeHtml(value: string) {
     return value
       .replace(/&/g, '&amp;')
@@ -360,30 +262,13 @@ export class EmailService {
   }
 }
 
-interface SmtpConfig {
-  host: string;
-  port: number;
-  secure: boolean;
-  user: string;
-  pass: string;
+interface EmailConfig {
+  apiKey: string;
   from: string;
-  connectionTimeout: number;
-  greetingTimeout: number;
-  socketTimeout: number;
-  dnsTimeout: number;
 }
 
-type SmtpError = {
-  code?: string;
-  command?: string;
-  responseCode?: number;
-  syscall?: string;
+type ResendError = {
+  name?: string;
+  message?: string;
+  statusCode?: number;
 };
-
-type SmtpErrorClassification =
-  | 'DNS failure'
-  | 'connection timeout'
-  | 'authentication failure'
-  | 'TLS failure'
-  | 'invalid configuration'
-  | 'unknown SMTP failure';

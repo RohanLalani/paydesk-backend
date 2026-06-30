@@ -31,6 +31,22 @@
 $ npm install
 ```
 
+## Environment
+
+Email delivery uses Resend. Set these variables in each deployment
+environment:
+
+```bash
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxx
+EMAIL_FROM="PayDesk <onboarding@resend.dev>"
+```
+
+For production, use a verified sender domain, for example:
+
+```bash
+EMAIL_FROM="PayDesk <noreply@paydeskapp.com>"
+```
+
 ## Compile and run the project
 
 ```bash
