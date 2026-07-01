@@ -170,26 +170,62 @@ export class StoreService {
 
     const dto = this.parseCreateBody(body);
 
+    return this.prisma.store.create({
+      data: {
+        name: dto.name,
+        address: dto.address,
+        businessType: dto.businessType,
+        ownerId: user.accountId,
+        isActive: false,
+      },
+      include: this.storeInclude,
+    });
+  }
+
+  async activateStore(storeId: string, user: AuthTokenPayload) {
+    this.assertOwner(user, 'Only owners can activate stores');
+
     return this.prisma.$transaction(async (tx) => {
+      const store = await tx.store.findUnique({
+        where: { id: storeId },
+      });
+
+      if (!store) {
+        throw new NotFoundException('Store not found');
+      }
+
+      if (store.ownerId !== user.accountId) {
+        throw new ForbiddenException(
+          'Only the store owner can activate this store',
+        );
+      }
+
+      if (store.isActive) {
+        return tx.store.findUnique({
+          where: { id: store.id },
+          include: this.storeInclude,
+        });
+      }
+
       const creationCheck = await this.canCreateStore(user.accountId, tx);
 
       if (!creationCheck.allowed || !creationCheck.subscription) {
-        throw new ForbiddenException(creationCheck.reason);
+        throw new ForbiddenException(
+          creationCheck.reason === 'Subscription store limit reached'
+            ? 'Subscription store limit reached.'
+            : 'You need an active subscription before activating a store.',
+        );
       }
 
-      const store = await tx.store.create({
-        data: {
-          name: dto.name,
-          address: dto.address,
-          businessType: dto.businessType,
-          ownerId: user.accountId,
-        },
+      const activatedStore = await tx.store.update({
+        where: { id: store.id },
+        data: { isActive: true },
         include: this.storeInclude,
       });
 
       await this.updateOwnerBilling(user.accountId, tx);
 
-      return store;
+      return activatedStore;
     });
   }
 
@@ -232,10 +268,13 @@ export class StoreService {
     });
   }
 
-  async myStores(user: AuthTokenPayload) {
+  async myStores(user: AuthTokenPayload, includeInactive = false) {
     if (user.type === StaffRole.owner) {
       return this.prisma.store.findMany({
-        where: { ownerId: user.accountId, isActive: true },
+        where: {
+          ownerId: user.accountId,
+          ...(includeInactive ? {} : { isActive: true }),
+        },
         orderBy: { createdAt: 'desc' },
         include: this.storeInclude,
       });

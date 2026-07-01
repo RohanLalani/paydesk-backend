@@ -8,7 +8,10 @@ import {
 import { CustomerTierDiscountModel, Prisma, StaffRole } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
-import { PosAccessService, StorePermission } from '../common/pos-access.service';
+import {
+  PosAccessService,
+  StorePermission,
+} from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
 
 @Injectable()

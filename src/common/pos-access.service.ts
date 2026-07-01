@@ -157,9 +157,8 @@ export class PosAccessService {
 
   private normalizePermission(permission: StorePermission) {
     return (
-      LEGACY_PERMISSION_MAP[
-        permission as keyof typeof LEGACY_PERMISSION_MAP
-      ] ?? permission
+      LEGACY_PERMISSION_MAP[permission as keyof typeof LEGACY_PERMISSION_MAP] ??
+      permission
     );
   }
 }

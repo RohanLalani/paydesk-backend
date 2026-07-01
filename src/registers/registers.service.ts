@@ -243,7 +243,9 @@ export class RegistersService {
       });
 
       if (updateCode.count !== 1) {
-        throw new UnauthorizedException('Activation code has already been used');
+        throw new UnauthorizedException(
+          'Activation code has already been used',
+        );
       }
 
       const register = await tx.register.update({
@@ -340,10 +342,7 @@ export class RegistersService {
     return context;
   }
 
-  private async ensureStoreMembership(
-    storeId: string,
-    user: AuthTokenPayload,
-  ) {
+  private async ensureStoreMembership(storeId: string, user: AuthTokenPayload) {
     const store = await this.prisma.store.findFirst({
       where: { id: storeId, isActive: true },
       select: {

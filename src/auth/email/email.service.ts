@@ -66,7 +66,7 @@ export class EmailService implements OnModuleInit {
       });
 
       if (result.error) {
-        throw result.error;
+        throw new Error(this.safeErrorMessage(result.error));
       }
 
       this.logger.log(

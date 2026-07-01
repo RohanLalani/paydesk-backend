@@ -32,11 +32,7 @@ export class ProductService {
         this.optionalBoolean(body.defaultAllowEbt, 'defaultAllowEbt', false) ??
         false,
     };
-    await this.access.ensureStoreAccess(
-      dto.storeId,
-      user,
-      'manage_products',
-    );
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
 
     try {
       return await this.prisma.department.create({ data: dto });
@@ -114,11 +110,7 @@ export class ProductService {
       name: this.requiredString(body.name, 'name'),
       description: this.optionalString(body.description, 'description'),
     };
-    await this.access.ensureStoreAccess(
-      dto.storeId,
-      user,
-      'manage_products',
-    );
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
 
     try {
       return await this.prisma.priceGroup.create({ data: dto });
@@ -194,11 +186,7 @@ export class ProductService {
       brand: this.optionalString(body.brand, 'brand'),
       description: this.optionalString(body.description, 'description'),
     };
-    await this.access.ensureStoreAccess(
-      dto.storeId,
-      user,
-      'manage_products',
-    );
+    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
 
     try {
       return await this.prisma.productCategory.create({ data: dto });
@@ -209,11 +197,7 @@ export class ProductService {
   }
 
   async listProductCategories(storeId: string, user: AuthTokenPayload) {
-    await this.access.ensureStoreAccess(
-      storeId,
-      user,
-      'manage_products',
-    );
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
 
     return this.prisma.productCategory.findMany({
       where: { storeId, isActive: true },

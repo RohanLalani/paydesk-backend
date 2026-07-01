@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return */
 import { UnauthorizedException } from '@nestjs/common';
 import { RegisterStatus, StaffRole, StorePermissionKey } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -49,8 +50,8 @@ describe('RegistersService', () => {
       }),
     });
 
-    const { codeHash } = prisma.registerActivationCode.create.mock.calls[0][0]
-      .data;
+    const { codeHash } =
+      prisma.registerActivationCode.create.mock.calls[0][0].data;
     expect(codeHash).not.toBe(result.code);
     await expect(bcrypt.compare(result.code, codeHash)).resolves.toBe(true);
   });

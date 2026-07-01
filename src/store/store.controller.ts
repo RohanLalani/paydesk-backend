@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Request,
   UseGuards,
 } from '@nestjs/common';
@@ -35,6 +36,14 @@ export class StoreController {
     return this.storeService.update(storeId, body, request.user);
   }
 
+  @Patch(':storeId/activate')
+  activate(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.storeService.activateStore(storeId, request.user);
+  }
+
   @Delete(':storeId')
   remove(
     @Param('storeId') storeId: string,
@@ -44,8 +53,11 @@ export class StoreController {
   }
 
   @Get('my-stores')
-  myStores(@Request() request: { user: AuthTokenPayload }) {
-    return this.storeService.myStores(request.user);
+  myStores(
+    @Request() request: { user: AuthTokenPayload },
+    @Query('includeInactive') includeInactive?: string,
+  ) {
+    return this.storeService.myStores(request.user, includeInactive === 'true');
   }
 
   @Get(':storeId')

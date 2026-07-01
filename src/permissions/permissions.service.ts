@@ -207,7 +207,11 @@ export class PermissionsService {
     storeId: string,
     user: AuthTokenPayload,
   ) {
-    await this.access.ensureStoreAccess(storeId, user, StorePermissionKey.view_store);
+    await this.access.ensureStoreAccess(
+      storeId,
+      user,
+      StorePermissionKey.view_store,
+    );
 
     const store = await this.prisma.store.findFirst({
       where: { id: storeId, isActive: true },
@@ -254,7 +258,9 @@ export class PermissionsService {
     }
 
     if (user.type !== StaffRole.owner || user.accountId !== store.ownerId) {
-      throw new ForbiddenException('Only the store owner can change permissions');
+      throw new ForbiddenException(
+        'Only the store owner can change permissions',
+      );
     }
 
     return store;

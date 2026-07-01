@@ -90,12 +90,16 @@ describe('PosAccessService', () => {
     });
 
     await expect(
-      service.ensureStoreAccess('store-1', {
-        accountId: 'partner-1',
-        staffId: 'staff-partner-1',
-        role: StaffRole.partner,
-        type: StaffRole.partner,
-      }, 'delete_store'),
+      service.ensureStoreAccess(
+        'store-1',
+        {
+          accountId: 'partner-1',
+          staffId: 'staff-partner-1',
+          role: StaffRole.partner,
+          type: StaffRole.partner,
+        },
+        'delete_store',
+      ),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

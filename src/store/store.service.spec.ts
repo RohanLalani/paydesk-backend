@@ -70,6 +70,7 @@ describe('StoreService businessType', () => {
           address: '123 Main Street',
           businessType: StoreBusinessType.convenience_store,
           ownerId: 'owner-1',
+          isActive: false,
         }),
       }),
     );
@@ -131,8 +132,8 @@ describe('StoreService businessType', () => {
     );
   });
 
-  it('recalculates subscription totals when creating a store', async () => {
-    prisma.store.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+  it('creates stores as inactive drafts without recalculating billing', async () => {
+    prisma.subscription.findFirst.mockResolvedValue(null);
 
     await service.create(
       {
@@ -142,6 +143,34 @@ describe('StoreService businessType', () => {
       ownerUser,
     );
 
+    expect(prisma.store.create).toHaveBeenCalledWith({
+      data: {
+        name: 'Downtown Store',
+        address: null,
+        businessType: StoreBusinessType.convenience_store,
+        ownerId: 'owner-1',
+        isActive: false,
+      },
+      include: expect.any(Object),
+    });
+    expect(prisma.subscription.findFirst).not.toHaveBeenCalled();
+    expect(prisma.subscription.update).not.toHaveBeenCalled();
+  });
+
+  it('activates a draft store and recalculates subscription totals', async () => {
+    prisma.store.findUnique.mockResolvedValue(
+      storeFixture({ isActive: false }),
+    );
+    prisma.store.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+    prisma.store.update.mockResolvedValue(storeFixture({ isActive: true }));
+
+    const result = await service.activateStore('store-1', ownerUser);
+
+    expect(prisma.store.update).toHaveBeenCalledWith({
+      where: { id: 'store-1' },
+      data: { isActive: true },
+      include: expect.any(Object),
+    });
     expect(prisma.subscription.update).toHaveBeenCalledWith({
       where: { id: 'subscription-1' },
       data: {
@@ -151,6 +180,7 @@ describe('StoreService businessType', () => {
         totalAnnualAmount: 600,
       },
     });
+    expect(result.isActive).toBe(true);
   });
 
   it('recalculates subscription totals when deleting a store', async () => {
@@ -225,6 +255,9 @@ function createMockPrisma(): MockPrisma {
       create: jest
         .fn()
         .mockImplementation(({ data }) => Promise.resolve(storeFixture(data))),
+      findUnique: jest
+        .fn()
+        .mockImplementation(() => Promise.resolve(storeFixture())),
       update: jest.fn(),
     },
     $transaction: jest.fn((callback) => callback(prisma)),
@@ -261,6 +294,7 @@ type MockPrisma = {
   store: {
     count: jest.Mock;
     create: jest.Mock;
+    findUnique: jest.Mock;
     update: jest.Mock;
   };
   $transaction: jest.Mock;

@@ -1,4 +1,11 @@
-import { Controller, Get, Param, Query, Request, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  Request,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { DashboardService, DashboardRange } from './dashboard.service';
@@ -14,11 +21,6 @@ export class DashboardController {
     @Query('range') range: DashboardRange | undefined,
     @Request() request: { user: AuthTokenPayload },
   ) {
-    return this.dashboardService.getStoreSummary(
-      storeId,
-      request.user,
-      range,
-    );
+    return this.dashboardService.getStoreSummary(storeId, request.user, range);
   }
 }
-

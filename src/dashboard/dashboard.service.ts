@@ -323,7 +323,10 @@ export class DashboardService {
             transaction.createdAt >= bucket.start &&
             transaction.createdAt <= bucket.end,
         )
-        .reduce((sum, transaction) => sum + this.toNumber(transaction.total), 0);
+        .reduce(
+          (sum, transaction) => sum + this.toNumber(transaction.total),
+          0,
+        );
 
       return {
         label: bucket.label,
@@ -361,8 +364,7 @@ export class DashboardService {
     return [...products.values()]
       .sort(
         (first, second) =>
-          second.revenue - first.revenue ||
-          second.unitsSold - first.unitsSold,
+          second.revenue - first.revenue || second.unitsSold - first.unitsSold,
       )
       .slice(0, 5);
   }
@@ -388,7 +390,10 @@ export class DashboardService {
   }
 
   private relativeTime(date: Date) {
-    const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+    const seconds = Math.max(
+      0,
+      Math.floor((Date.now() - date.getTime()) / 1000),
+    );
 
     if (seconds < 60) {
       return `${seconds} seconds ago`;

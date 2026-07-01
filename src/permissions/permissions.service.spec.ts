@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { StaffRole, StorePermissionKey } from '@prisma/client';
 import { PosAccessService } from '../common/pos-access.service';
@@ -44,10 +45,12 @@ describe('PermissionsService', () => {
               permission !== StorePermissionKey.delete_store,
           ),
         ),
-      getEffectivePermissionsForStaff: jest.fn().mockResolvedValue([
-        StorePermissionKey.view_store,
-        StorePermissionKey.process_sales,
-      ]),
+      getEffectivePermissionsForStaff: jest
+        .fn()
+        .mockResolvedValue([
+          StorePermissionKey.view_store,
+          StorePermissionKey.process_sales,
+        ]),
     };
     service = new PermissionsService(
       prisma as unknown as PrismaService,

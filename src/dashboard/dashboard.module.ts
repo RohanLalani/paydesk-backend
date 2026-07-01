@@ -9,4 +9,3 @@ import { DashboardService } from './dashboard.service';
   providers: [DashboardService, PrismaService, PosAccessService],
 })
 export class DashboardModule {}
-
