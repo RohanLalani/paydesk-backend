@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { json, urlencoded } from 'express';
+import { json, raw, urlencoded } from 'express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { InputValidationPipe } from './common/input-validation.pipe';
@@ -7,6 +7,7 @@ import { InputValidationPipe } from './common/input-validation.pipe';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   app.use(helmet());
+  app.use('/billing/webhook', raw({ type: 'application/json' }));
   app.use(json({ limit: '64kb' }));
   app.use(
     urlencoded({

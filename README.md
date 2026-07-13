@@ -48,6 +48,54 @@ For production, use a verified sender domain, for example:
 EMAIL_FROM="PayDesk <noreply@paydeskapp.com>"
 ```
 
+Stripe subscription checkout for store activation also requires:
+
+```bash
+STRIPE_SECRET_KEY=sk_test_xxxxxxxxxxxxx
+STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxx
+STRIPE_PLUS_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_ADVANCED_PRICE_ID=price_xxxxxxxxxxxxx
+BACKOFFICE_URL=http://localhost:3000
+```
+
+Create two recurring monthly prices in Stripe Dashboard:
+
+- Plus: USD 50 per month
+- Advanced: USD 80 per month
+
+Copy each Stripe Price ID into `STRIPE_PLUS_PRICE_ID` and
+`STRIPE_ADVANCED_PRICE_ID`. Do not expose `STRIPE_SECRET_KEY` or
+`STRIPE_WEBHOOK_SECRET` to the frontend.
+
+The Stripe webhook endpoint is:
+
+```bash
+POST /billing/webhook
+```
+
+Enable these Stripe webhook events:
+
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+- `invoice.paid`
+- `invoice.payment_failed`
+
+Local Stripe CLI test flow:
+
+```bash
+# terminal 1
+npm run start:dev
+
+# terminal 2
+stripe listen --forward-to localhost:<backend-port>/billing/webhook
+```
+
+Copy the CLI signing secret into `STRIPE_WEBHOOK_SECRET`, use Stripe test mode
+Price IDs, complete Checkout with a Stripe test card, and confirm the store
+stays inactive until the verified webhook updates the local subscription state.
+
 ## Compile and run the project
 
 ```bash

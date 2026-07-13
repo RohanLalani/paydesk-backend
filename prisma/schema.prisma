@@ -31,6 +31,18 @@ enum SubscriptionPlan {
   advanced
 }
 
+enum StoreSubscriptionStatus {
+  pending
+  active
+  trialing
+  past_due
+  canceled
+  unpaid
+  incomplete
+  incomplete_expired
+  paused
+}
+
 enum StoreBusinessType {
   convenience_store
   grocery_store
@@ -291,8 +303,38 @@ model Store {
   registers               Register[]
   registerActivationCodes RegisterActivationCode[]
   registerDevices         RegisterDevice[]
+  storeSubscription       StoreSubscription?
 
   @@index([ownerId, isActive])
+}
+
+model StoreSubscription {
+  id String @id @default(uuid())
+
+  storeId String @unique
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  plan                    SubscriptionPlan
+  status                  StoreSubscriptionStatus @default(pending)
+  stripeCustomerId        String?
+  stripeSubscriptionId    String?                 @unique
+  stripeCheckoutSessionId String?                 @unique
+  stripePriceId           String?
+  currentPeriodStart      DateTime?
+  currentPeriodEnd        DateTime?
+  cancelAtPeriodEnd       Boolean                 @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([stripeCustomerId])
+}
+
+model StripeWebhookEvent {
+  id        String   @id
+  type      String
+  createdAt DateTime @default(now())
 }
 
 model Register {
