@@ -3,7 +3,11 @@ import {
   Controller,
   Get,
   Headers,
+  HttpException,
   HttpCode,
+  HttpStatus,
+  InternalServerErrorException,
+  Logger,
   Patch,
   Post,
   Req,
@@ -18,6 +22,8 @@ import { BillingService } from './billing.service';
 
 @Controller('billing')
 export class BillingController {
+  private readonly logger = new Logger(BillingController.name);
+
   constructor(
     private readonly storeService: StoreService,
     private readonly billingService: BillingService,
@@ -40,11 +46,44 @@ export class BillingController {
 
   @Post('checkout-session')
   @UseGuards(JwtAuthGuard)
-  createCheckoutSession(
+  async createCheckoutSession(
     @Body() body: Record<string, unknown>,
     @Request() request: { user: AuthTokenPayload },
   ) {
-    return this.billingService.createCheckoutSession(body, request.user);
+    try {
+      return await this.billingService.createCheckoutSession(
+        body,
+        request.user,
+      );
+    } catch (error: unknown) {
+      this.logCheckoutError(error);
+
+      if (error instanceof HttpException) {
+        const status = error.getStatus();
+
+        if (status < Number(HttpStatus.INTERNAL_SERVER_ERROR)) {
+          throw error;
+        }
+      }
+
+      if (process.env.NODE_ENV !== 'production') {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+            message: 'Checkout session creation failed',
+            diagnostic:
+              error instanceof Error ? error.message : 'Unknown checkout error',
+            errorType: this.errorValue(error, 'type') ?? this.errorName(error),
+            errorCode: this.errorValue(error, 'code'),
+          },
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
+      }
+
+      throw new InternalServerErrorException(
+        'Checkout session creation failed',
+      );
+    }
   }
 
   @Post('webhook')
@@ -58,5 +97,36 @@ export class BillingController {
       : Buffer.from('');
 
     return this.billingService.handleWebhook(rawBody, signature);
+  }
+
+  private logCheckoutError(error: unknown) {
+    const payload = this.checkoutErrorPayload(error);
+
+    this.logger.error('CHECKOUT SESSION ERROR', payload.stack);
+    console.error('CHECKOUT SESSION ERROR', payload);
+  }
+
+  private checkoutErrorPayload(error: unknown) {
+    return {
+      name: this.errorName(error),
+      message: error instanceof Error ? error.message : String(error),
+      code: this.errorValue(error, 'code'),
+      type: this.errorValue(error, 'type'),
+      requestId: this.errorValue(error, 'requestId'),
+      meta: this.errorValue(error, 'meta'),
+      stack: error instanceof Error ? error.stack : undefined,
+    };
+  }
+
+  private errorName(error: unknown) {
+    return error instanceof Error ? error.name : undefined;
+  }
+
+  private errorValue(error: unknown, key: string) {
+    if (!error || typeof error !== 'object' || !(key in error)) {
+      return undefined;
+    }
+
+    return (error as Record<string, unknown>)[key];
   }
 }

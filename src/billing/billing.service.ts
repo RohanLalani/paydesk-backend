@@ -40,6 +40,30 @@ export class BillingService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
+    this.logCheckoutCheckpoint('Checkout request received', {});
+    this.logCheckoutCheckpoint('authenticated user ID', {
+      userId: user.accountId,
+    });
+    this.logCheckoutCheckpoint('request storeId', {
+      storeId: typeof body.storeId === 'string' ? body.storeId : undefined,
+    });
+    this.logCheckoutCheckpoint('request plan', {
+      plan: typeof body.plan === 'string' ? body.plan : undefined,
+    });
+
+    try {
+      return await this.createCheckoutSessionUnsafe(body, user);
+    } catch (error: unknown) {
+      this.logCheckoutError(error);
+      this.logCheckoutFailureHint(error);
+      throw error;
+    }
+  }
+
+  private async createCheckoutSessionUnsafe(
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
     if (user.type !== StaffRole.owner) {
       throw new ForbiddenException('Only owners can activate stores');
     }
@@ -47,6 +71,34 @@ export class BillingService {
     const storeId = this.requiredString(body.storeId, 'storeId');
     const checkoutPlan = this.requiredCheckoutPlan(body.plan);
     const plan = this.toSubscriptionPlan(checkoutPlan);
+    const stripeSecretKey = this.optionalConfig('STRIPE_SECRET_KEY');
+    const plusPriceId = this.optionalConfig('STRIPE_PLUS_PRICE_ID');
+    const advancedPriceId = this.optionalConfig('STRIPE_ADVANCED_PRICE_ID');
+    const backofficeUrl = this.optionalConfig('BACKOFFICE_URL');
+
+    this.logCheckoutCheckpoint('whether STRIPE_SECRET_KEY is configured', {
+      configured: Boolean(stripeSecretKey),
+      mode: this.stripeSecretMode(stripeSecretKey),
+    });
+    this.logCheckoutCheckpoint('whether STRIPE_PLUS_PRICE_ID is configured', {
+      configured: Boolean(plusPriceId),
+      priceIdPrefix: this.stripeIdPrefix(plusPriceId),
+    });
+    this.logCheckoutCheckpoint(
+      'whether STRIPE_ADVANCED_PRICE_ID is configured',
+      {
+        configured: Boolean(advancedPriceId),
+        priceIdPrefix: this.stripeIdPrefix(advancedPriceId),
+      },
+    );
+    this.logCheckoutCheckpoint('whether BACKOFFICE_URL is configured', {
+      configured: Boolean(backofficeUrl),
+      fallbackConfigured: Boolean(
+        this.optionalConfig('BACKOFFICE_FRONTEND_URL') ??
+        this.optionalConfig('FRONTEND_URL'),
+      ),
+    });
+
     const stripePriceId = this.getPriceId(checkoutPlan);
     const frontendUrl = this.getFrontendUrl();
 
@@ -54,8 +106,16 @@ export class BillingService {
       where: { id: storeId },
       include: {
         owner: { select: { id: true, email: true, name: true } },
-        storeSubscription: true,
       },
+    });
+
+    this.logCheckoutCheckpoint('store lookup completion', {
+      storeId,
+      found: Boolean(store),
+      isActive: store?.isActive,
+      ownerMatchesUser: store?.ownerId === user.accountId,
+      ownerEmailConfigured: Boolean(store?.owner.email),
+      ownerNameConfigured: Boolean(store?.owner.name),
     });
 
     if (!store) {
@@ -70,14 +130,45 @@ export class BillingService {
       throw new BadRequestException('Store is already active');
     }
 
+    const existingStoreSubscription =
+      await this.prisma.storeSubscription.findUnique({
+        where: { storeId },
+      });
+
+    this.logCheckoutCheckpoint('subscription database lookup completion', {
+      storeId,
+      found: Boolean(existingStoreSubscription),
+      status: existingStoreSubscription?.status,
+      plan: existingStoreSubscription?.plan,
+      hasStripeCustomerId: Boolean(existingStoreSubscription?.stripeCustomerId),
+      hasStripeSubscriptionId: Boolean(
+        existingStoreSubscription?.stripeSubscriptionId,
+      ),
+      hasStripeCheckoutSessionId: Boolean(
+        existingStoreSubscription?.stripeCheckoutSessionId,
+      ),
+    });
+
     if (
-      store.storeSubscription &&
-      BLOCKED_CHECKOUT_STATUSES.has(store.storeSubscription.status)
+      existingStoreSubscription &&
+      BLOCKED_CHECKOUT_STATUSES.has(existingStoreSubscription.status)
     ) {
       throw new BadRequestException(
         'Store already has an active or pending subscription',
       );
     }
+
+    this.logCheckoutCheckpoint('permission validation completion', {
+      storeId,
+      userId: user.accountId,
+      isOwner: user.type === StaffRole.owner,
+      ownerMatchesStore: store.ownerId === user.accountId,
+      storeIsInactive: !store.isActive,
+      existingSubscriptionAllowsCheckout: !(
+        existingStoreSubscription &&
+        BLOCKED_CHECKOUT_STATUSES.has(existingStoreSubscription.status)
+      ),
+    });
 
     const stripe = this.getStripe();
     const customer = await stripe.customers.create({
@@ -90,6 +181,13 @@ export class BillingService {
       },
     });
 
+    this.logCheckoutCheckpoint('Stripe customer creation completion', {
+      storeId,
+      customerId: customer.id,
+      ownerEmailConfigured: Boolean(store.owner.email),
+      ownerNameConfigured: Boolean(store.owner.name),
+    });
+
     const successUrl = new URL('/billing/success', frontendUrl);
     successUrl.searchParams.set('session_id', '{CHECKOUT_SESSION_ID}');
     successUrl.searchParams.set('storeId', storeId);
@@ -97,36 +195,68 @@ export class BillingService {
     const cancelUrl = new URL('/billing/cancel', frontendUrl);
     cancelUrl.searchParams.set('storeId', storeId);
 
-    const session = await stripe.checkout.sessions.create(
-      {
-        mode: 'subscription',
-        customer: customer.id,
-        line_items: [{ price: stripePriceId, quantity: 1 }],
-        success_url: successUrl.toString(),
-        cancel_url: cancelUrl.toString(),
+    const sessionParams: Stripe.Checkout.SessionCreateParams = {
+      mode: 'subscription',
+      customer: customer.id,
+      line_items: [{ price: stripePriceId, quantity: 1 }],
+      success_url: successUrl.toString(),
+      cancel_url: cancelUrl.toString(),
+      metadata: {
+        storeId,
+        plan: checkoutPlan,
+        ownerId: store.ownerId,
+        paydeskAccountId: user.accountId,
+      },
+      subscription_data: {
         metadata: {
           storeId,
           plan: checkoutPlan,
           ownerId: store.ownerId,
           paydeskAccountId: user.accountId,
         },
-        subscription_data: {
-          metadata: {
-            storeId,
-            plan: checkoutPlan,
-            ownerId: store.ownerId,
-            paydeskAccountId: user.accountId,
-          },
-        },
       },
+    };
+
+    this.logCheckoutCheckpoint(
+      'immediately before Stripe checkout.sessions.create',
       {
-        idempotencyKey: `store-checkout:${storeId}:${checkoutPlan}`,
+        storeId,
+        checkoutPlan,
+        customerId: customer.id,
+        priceIdPrefix: this.stripeIdPrefix(stripePriceId),
+        successUrlOrigin: successUrl.origin,
+        cancelUrlOrigin: cancelUrl.origin,
+      },
+    );
+
+    const session = await stripe.checkout.sessions.create(sessionParams, {
+      idempotencyKey: `store-checkout:${storeId}:${checkoutPlan}`,
+    });
+
+    this.logCheckoutCheckpoint(
+      'immediately after Stripe checkout.sessions.create',
+      {
+        storeId,
+        checkoutSessionId: session.id,
+        checkoutUrlConfigured: Boolean(session.url),
       },
     );
 
     if (!session.url) {
       throw new ServiceUnavailableException('Stripe session creation failed');
     }
+
+    this.logCheckoutCheckpoint(
+      'immediately before any Prisma subscription create/update operation',
+      {
+        storeId,
+        plan,
+        status: StoreSubscriptionStatus.pending,
+        hasStripeCustomerId: Boolean(customer.id),
+        hasStripeCheckoutSessionId: Boolean(session.id),
+        priceIdPrefix: this.stripeIdPrefix(stripePriceId),
+      },
+    );
 
     await this.prisma.storeSubscription.upsert({
       where: { storeId },
@@ -438,6 +568,132 @@ export class BillingService {
       status === StoreSubscriptionStatus.active ||
       status === StoreSubscriptionStatus.trialing
     );
+  }
+
+  private logCheckoutCheckpoint(
+    checkpoint: string,
+    details: Record<string, unknown>,
+  ) {
+    const payload = { checkpoint, ...details };
+
+    this.logger.log(checkpoint, JSON.stringify(payload));
+    console.error(checkpoint, payload);
+  }
+
+  private logCheckoutError(error: unknown) {
+    const payload = this.checkoutErrorPayload(error);
+
+    this.logger.error('CHECKOUT SESSION ERROR', payload.stack);
+    console.error('CHECKOUT SESSION ERROR', payload);
+  }
+
+  private logCheckoutFailureHint(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = this.errorValue(error, 'code');
+    const type = this.errorValue(error, 'type');
+    const meta = this.errorValue(error, 'meta');
+    const hints: string[] = [];
+
+    if (message.includes('STRIPE_SECRET_KEY is not configured')) {
+      hints.push('missing STRIPE_SECRET_KEY');
+    }
+
+    if (message.includes('STRIPE_PLUS_PRICE_ID is not configured')) {
+      hints.push('missing STRIPE_PLUS_PRICE_ID');
+    }
+
+    if (message.includes('STRIPE_ADVANCED_PRICE_ID is not configured')) {
+      hints.push('missing STRIPE_ADVANCED_PRICE_ID');
+    }
+
+    if (message.includes('Invalid URL')) {
+      hints.push('malformed BACKOFFICE_URL');
+    }
+
+    if (message.includes('plan must be PLUS or ADVANCED')) {
+      hints.push('incorrect plan enum values');
+    }
+
+    if (typeof code === 'string' && code === 'resource_missing') {
+      hints.push(
+        'Stripe resource missing: check price id, test/live mode mismatch, or Stripe sandbox/account mismatch',
+      );
+    }
+
+    if (
+      typeof type === 'string' &&
+      (type === 'StripeInvalidRequestError' || type === 'invalid_request_error')
+    ) {
+      hints.push(
+        'Stripe rejected checkout request: check Price IDs, customer fields, and account mode',
+      );
+    }
+
+    if (
+      typeof code === 'string' &&
+      (code === 'P2021' || code === 'P2022' || code === 'P2023')
+    ) {
+      hints.push('Prisma billing migrations may not be deployed');
+    }
+
+    if (typeof code === 'string' && code === 'P2002') {
+      hints.push('database uniqueness conflict');
+    }
+
+    if (message.toLowerCase().includes('customer')) {
+      hints.push('missing or invalid Stripe customer fields');
+    }
+
+    if (hints.length) {
+      const payload = { message, code, type, meta, hints };
+
+      this.logger.error('CHECKOUT SESSION FAILURE HINTS');
+      console.error('CHECKOUT SESSION FAILURE HINTS', payload);
+    }
+  }
+
+  private checkoutErrorPayload(error: unknown) {
+    return {
+      name: error instanceof Error ? error.name : undefined,
+      message: error instanceof Error ? error.message : String(error),
+      code: this.errorValue(error, 'code'),
+      type: this.errorValue(error, 'type'),
+      requestId: this.errorValue(error, 'requestId'),
+      meta: this.errorValue(error, 'meta'),
+      stack: error instanceof Error ? error.stack : undefined,
+    };
+  }
+
+  private stripeSecretMode(value?: string) {
+    if (!value) {
+      return 'missing';
+    }
+
+    if (value.startsWith('sk_test_')) {
+      return 'test';
+    }
+
+    if (value.startsWith('sk_live_')) {
+      return 'live';
+    }
+
+    return 'unknown';
+  }
+
+  private stripeIdPrefix(value?: string) {
+    if (!value) {
+      return undefined;
+    }
+
+    return value.split('_').slice(0, 2).join('_');
+  }
+
+  private errorValue(error: unknown, key: string) {
+    if (!error || typeof error !== 'object' || !(key in error)) {
+      return undefined;
+    }
+
+    return (error as Record<string, unknown>)[key];
   }
 
   private getFrontendUrl() {
