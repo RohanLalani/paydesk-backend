@@ -3,9 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL") 
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum StaffRole {
@@ -315,15 +315,18 @@ model StoreSubscription {
   storeId String @unique
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
-  plan                    SubscriptionPlan
-  status                  StoreSubscriptionStatus @default(pending)
-  stripeCustomerId        String?
-  stripeSubscriptionId    String?                 @unique
-  stripeCheckoutSessionId String?                 @unique
-  stripePriceId           String?
-  currentPeriodStart      DateTime?
-  currentPeriodEnd        DateTime?
-  cancelAtPeriodEnd       Boolean                 @default(false)
+  plan                     SubscriptionPlan
+  status                   StoreSubscriptionStatus @default(pending)
+  stripeCustomerId         String?
+  stripeSubscriptionId     String?                 @unique
+  stripeCheckoutSessionId  String?                 @unique
+  stripePriceId            String?
+  checkoutAttemptId        String?
+  checkoutIdempotencyKey   String?
+  checkoutSessionExpiresAt DateTime?
+  currentPeriodStart       DateTime?
+  currentPeriodEnd         DateTime?
+  cancelAtPeriodEnd        Boolean                 @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

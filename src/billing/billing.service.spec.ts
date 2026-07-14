@@ -130,9 +130,243 @@ describe('BillingService Stripe checkout', () => {
       expect.objectContaining({
         create: expect.objectContaining({
           status: StoreSubscriptionStatus.pending,
+          checkoutAttemptId: expect.any(String),
+          checkoutIdempotencyKey: expect.stringMatching(
+            /^store-checkout:store-1:PLUS:/,
+          ),
         }),
       }),
     );
+  });
+
+  it('repeated clicks during one attempt return the same open session', async () => {
+    prisma.storeSubscription.findUnique.mockResolvedValue(
+      storeSubscriptionFixture({
+        stripeCheckoutSessionId: 'cs_open',
+        stripeCustomerId: 'cus_existing',
+        checkoutAttemptId: 'attempt-existing',
+        checkoutIdempotencyKey: 'store-checkout:store-1:PLUS:attempt-existing',
+      }),
+    );
+    stripe.checkout.sessions.retrieve.mockResolvedValue(
+      checkoutSessionFixture({
+        id: 'cs_open',
+        url: 'https://checkout.stripe.test/open-session',
+        status: 'open',
+      }),
+    );
+
+    await expect(
+      service.createCheckoutSession(
+        { storeId: 'store-1', plan: 'PLUS' },
+        ownerUser,
+      ),
+    ).resolves.toEqual({
+      checkoutUrl: 'https://checkout.stripe.test/open-session',
+      checkoutSessionId: 'cs_open',
+    });
+
+    expect(stripe.checkout.sessions.retrieve).toHaveBeenCalledWith('cs_open');
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+  });
+
+  it('a new attempt uses a different idempotency key', async () => {
+    const createCheckoutAttemptId = jest.spyOn(
+      service as unknown as { createCheckoutAttemptId: () => string },
+      'createCheckoutAttemptId',
+    );
+    createCheckoutAttemptId
+      .mockReturnValueOnce('11111111-1111-4111-8111-111111111111')
+      .mockReturnValueOnce('22222222-2222-4222-8222-222222222222');
+
+    await service.createCheckoutSession(
+      { storeId: 'store-1', plan: 'PLUS' },
+      ownerUser,
+    );
+
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        idempotencyKey:
+          'store-checkout:store-1:PLUS:11111111-1111-4111-8111-111111111111',
+      }),
+    );
+
+    stripe.checkout.sessions.create.mockClear();
+    prisma.storeSubscription.findUnique.mockResolvedValue(
+      storeSubscriptionFixture({
+        stripeCheckoutSessionId: 'cs_expired',
+        stripeCustomerId: 'cus_existing',
+        checkoutAttemptId: 'attempt-old',
+        checkoutIdempotencyKey: 'store-checkout:store-1:PLUS:attempt-old',
+      }),
+    );
+    stripe.checkout.sessions.retrieve.mockResolvedValue(
+      checkoutSessionFixture({
+        id: 'cs_expired',
+        status: 'expired',
+        url: null,
+        expires_at: pastStripeTimestamp(),
+      }),
+    );
+
+    await service.createCheckoutSession(
+      { storeId: 'store-1', plan: 'PLUS' },
+      ownerUser,
+    );
+
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        idempotencyKey:
+          'store-checkout:store-1:PLUS:22222222-2222-4222-8222-222222222222',
+      }),
+    );
+
+    createCheckoutAttemptId.mockRestore();
+  });
+
+  it('changing the configured Price ID does not reuse an old idempotency key', async () => {
+    service = new BillingService(
+      prisma as unknown as PrismaService,
+      mockConfig({
+        STRIPE_PLUS_PRICE_ID: 'price_plus_v2',
+      }) as unknown as ConfigService,
+      storeService as unknown as StoreService,
+    );
+    (service as unknown as { stripe: MockStripe }).stripe = stripe;
+    const createCheckoutAttemptId = jest
+      .spyOn(
+        service as unknown as { createCheckoutAttemptId: () => string },
+        'createCheckoutAttemptId',
+      )
+      .mockReturnValue('33333333-3333-4333-8333-333333333333');
+    prisma.storeSubscription.findUnique.mockResolvedValue(
+      storeSubscriptionFixture({
+        stripeCheckoutSessionId: null,
+        checkoutAttemptId: 'attempt-old',
+        checkoutIdempotencyKey: 'store-checkout:store-1:PLUS:attempt-old',
+        stripePriceId: 'price_plus',
+      }),
+    );
+
+    await service.createCheckoutSession(
+      { storeId: 'store-1', plan: 'PLUS' },
+      ownerUser,
+    );
+
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        line_items: [{ price: 'price_plus_v2', quantity: 1 }],
+      }),
+      expect.objectContaining({
+        idempotencyKey:
+          'store-checkout:store-1:PLUS:33333333-3333-4333-8333-333333333333',
+      }),
+    );
+
+    createCheckoutAttemptId.mockRestore();
+  });
+
+  it('an expired session results in a new session', async () => {
+    prisma.storeSubscription.findUnique.mockResolvedValue(
+      storeSubscriptionFixture({
+        stripeCheckoutSessionId: 'cs_expired',
+        stripeCustomerId: 'cus_existing',
+      }),
+    );
+    stripe.checkout.sessions.retrieve.mockResolvedValue(
+      checkoutSessionFixture({
+        id: 'cs_expired',
+        status: 'expired',
+        url: null,
+        expires_at: pastStripeTimestamp(),
+      }),
+    );
+    stripe.checkout.sessions.create.mockResolvedValue(
+      checkoutSessionFixture({
+        id: 'cs_new',
+        url: 'https://checkout.stripe.test/new-session',
+      }),
+    );
+
+    await expect(
+      service.createCheckoutSession(
+        { storeId: 'store-1', plan: 'PLUS' },
+        ownerUser,
+      ),
+    ).resolves.toEqual({
+      checkoutUrl: 'https://checkout.stripe.test/new-session',
+      checkoutSessionId: 'cs_new',
+    });
+
+    expect(stripe.checkout.sessions.retrieve).toHaveBeenCalledWith(
+      'cs_expired',
+    );
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledTimes(1);
+    expect(prisma.storeSubscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          stripeCheckoutSessionId: 'cs_new',
+          checkoutSessionExpiresAt: expect.any(Date),
+        }),
+      }),
+    );
+  });
+
+  it('reuses an existing Stripe customer', async () => {
+    prisma.storeSubscription.findUnique.mockResolvedValue(
+      storeSubscriptionFixture({
+        stripeCheckoutSessionId: null,
+        stripeCustomerId: 'cus_existing',
+      }),
+    );
+
+    await service.createCheckoutSession(
+      { storeId: 'store-1', plan: 'PLUS' },
+      ownerUser,
+    );
+
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customer: 'cus_existing',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('returns store activation status for the owner', async () => {
+    prisma.store.findUnique.mockResolvedValue(
+      storeFixture({
+        isActive: true,
+        storeSubscription: {
+          status: StoreSubscriptionStatus.active,
+          plan: SubscriptionPlan.plus,
+        },
+      }),
+    );
+
+    await expect(
+      service.getStoreActivationStatus('store-1', ownerUser),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        storeId: 'store-1',
+        name: 'Downtown Store',
+        address: null,
+        businessType: StoreBusinessType.convenience_store,
+        isActive: true,
+        subscriptionStatus: StoreSubscriptionStatus.active,
+        plan: SubscriptionPlan.plus,
+      }),
+    );
+  });
+
+  it('rejects activation status lookups for non-owners', async () => {
+    await expect(
+      service.getStoreActivationStatus('store-1', partnerUser),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('accepts valid webhook signatures', async () => {
@@ -251,6 +485,7 @@ function createMockPrisma(): MockPrisma {
     storeSubscription: {
       findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn(),
+      update: jest.fn(),
     },
     stripeWebhookEvent: {
       findUnique: jest.fn().mockResolvedValue(null),
@@ -283,7 +518,10 @@ function createMockStripe(): MockStripe {
         create: jest.fn().mockResolvedValue({
           id: 'cs_test',
           url: 'https://checkout.stripe.test/session',
+          status: 'open',
+          expires_at: futureStripeTimestamp(),
         }),
+        retrieve: jest.fn(),
       },
     },
     webhooks: {
@@ -295,13 +533,14 @@ function createMockStripe(): MockStripe {
   };
 }
 
-function mockConfig() {
+function mockConfig(overrides: Record<string, string> = {}) {
   const values: Record<string, string> = {
     STRIPE_SECRET_KEY: 'sk_test_123',
     STRIPE_WEBHOOK_SECRET: 'whsec_123',
     STRIPE_PLUS_PRICE_ID: 'price_plus',
     STRIPE_ADVANCED_PRICE_ID: 'price_advanced',
     BACKOFFICE_URL: 'http://localhost:3000',
+    ...overrides,
   };
 
   return {
@@ -327,6 +566,46 @@ function storeFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function storeSubscriptionFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'store-subscription-1',
+    storeId: 'store-1',
+    plan: SubscriptionPlan.plus,
+    status: StoreSubscriptionStatus.pending,
+    stripeCustomerId: null,
+    stripeSubscriptionId: null,
+    stripeCheckoutSessionId: null,
+    stripePriceId: 'price_plus',
+    checkoutAttemptId: null,
+    checkoutIdempotencyKey: null,
+    checkoutSessionExpiresAt: null,
+    currentPeriodStart: null,
+    currentPeriodEnd: null,
+    cancelAtPeriodEnd: false,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function checkoutSessionFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'cs_test',
+    url: 'https://checkout.stripe.test/session',
+    status: 'open',
+    expires_at: futureStripeTimestamp(),
+    ...overrides,
+  };
+}
+
+function futureStripeTimestamp() {
+  return Math.floor(Date.now() / 1000) + 3600;
+}
+
+function pastStripeTimestamp() {
+  return Math.floor(Date.now() / 1000) - 3600;
+}
+
 function subscriptionFixture(status: string) {
   return {
     id: 'sub_1',
@@ -350,7 +629,7 @@ function stripeEvent(type: string, object: unknown) {
 
 type MockStripe = {
   customers: { create: jest.Mock };
-  checkout: { sessions: { create: jest.Mock } };
+  checkout: { sessions: { create: jest.Mock; retrieve: jest.Mock } };
   webhooks: { constructEvent: jest.Mock };
   subscriptions: { retrieve: jest.Mock };
 };
@@ -364,6 +643,7 @@ type MockPrisma = {
   storeSubscription: {
     findUnique: jest.Mock;
     upsert: jest.Mock;
+    update: jest.Mock;
   };
   stripeWebhookEvent: {
     findUnique: jest.Mock;

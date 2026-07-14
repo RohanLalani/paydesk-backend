@@ -8,6 +8,7 @@ import {
   HttpStatus,
   InternalServerErrorException,
   Logger,
+  Param,
   Patch,
   Post,
   Req,
@@ -42,6 +43,15 @@ export class BillingController {
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.storeService.updateSubscriptionPlan(body, request.user);
+  }
+
+  @Get('store-activation-status/:storeId')
+  @UseGuards(JwtAuthGuard)
+  getStoreActivationStatus(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.billingService.getStoreActivationStatus(storeId, request.user);
   }
 
   @Post('checkout-session')
@@ -103,7 +113,6 @@ export class BillingController {
     const payload = this.checkoutErrorPayload(error);
 
     this.logger.error('CHECKOUT SESSION ERROR', payload.stack);
-    console.error('CHECKOUT SESSION ERROR', payload);
   }
 
   private checkoutErrorPayload(error: unknown) {
