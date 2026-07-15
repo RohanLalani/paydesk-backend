@@ -36,6 +36,23 @@ export class StoreController {
     return this.storeService.update(storeId, body, request.user);
   }
 
+  @Get(':storeId/features')
+  getFeatures(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.storeService.getFeatures(storeId, request.user);
+  }
+
+  @Patch(':storeId/features')
+  updateFeatures(
+    @Param('storeId') storeId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.storeService.updateFeatures(storeId, body, request.user);
+  }
+
   @Patch(':storeId/activate')
   activate(
     @Param('storeId') storeId: string,

@@ -150,6 +150,20 @@ describe('StoreService businessType', () => {
         businessType: StoreBusinessType.convenience_store,
         ownerId: 'owner-1',
         isActive: false,
+        features: {
+          create: [
+            {
+              feature: 'lottery',
+              enabled: false,
+              source: 'setup',
+            },
+            {
+              feature: 'recipe_suite',
+              enabled: false,
+              source: 'setup',
+            },
+          ],
+        },
       },
       include: expect.any(Object),
     });

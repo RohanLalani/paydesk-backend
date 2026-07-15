@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   HttpException,
@@ -52,6 +53,56 @@ export class BillingController {
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.billingService.getStoreActivationStatus(storeId, request.user);
+  }
+
+  @Get('stores/:storeId/summary')
+  @UseGuards(JwtAuthGuard)
+  getStoreBillingSummary(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.billingService.getStoreBillingSummary(storeId, request.user);
+  }
+
+  @Get('stores/:storeId/services')
+  @UseGuards(JwtAuthGuard)
+  getStoreServices(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.billingService.getStoreServices(storeId, request.user);
+  }
+
+  @Post('stores/:storeId/services')
+  @UseGuards(JwtAuthGuard)
+  addStoreService(
+    @Param('storeId') storeId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.billingService.addStoreService(storeId, body, request.user);
+  }
+
+  @Post('stores/:storeId/services/loyalty')
+  @UseGuards(JwtAuthGuard)
+  addLoyaltyService(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.billingService.addStoreService(
+      storeId,
+      { service: 'LOYALTY' },
+      request.user,
+    );
+  }
+
+  @Delete('stores/:storeId/services/loyalty')
+  @UseGuards(JwtAuthGuard)
+  removeLoyaltyService(
+    @Param('storeId') storeId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.billingService.removeStoreService(storeId, request.user);
   }
 
   @Post('checkout-session')

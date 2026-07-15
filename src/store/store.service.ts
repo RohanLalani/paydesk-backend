@@ -7,7 +7,11 @@ import {
 import {
   Prisma,
   StaffRole,
+  StoreFeatureKey,
+  StoreFeatureSource,
   StoreBusinessType,
+  StoreServiceKey,
+  StoreServiceStatus,
   SubscriptionPlan,
   SubscriptionStatus,
 } from '@prisma/client';
@@ -170,16 +174,25 @@ export class StoreService {
 
     const dto = this.parseCreateBody(body);
 
-    return this.prisma.store.create({
+    const store = await this.prisma.store.create({
       data: {
         name: dto.name,
         address: dto.address,
         businessType: dto.businessType,
         ownerId: user.accountId,
         isActive: false,
+        features: {
+          create: this.includedFeatureKeys.map((feature) => ({
+            feature,
+            enabled: dto.features.includes(feature),
+            source: StoreFeatureSource.setup,
+          })),
+        },
       },
       include: this.storeInclude,
     });
+
+    return this.serializeStore(store);
   }
 
   async activateStore(storeId: string, user: AuthTokenPayload) {
@@ -201,10 +214,12 @@ export class StoreService {
       }
 
       if (store.isActive) {
-        return tx.store.findUnique({
+        const existing = await tx.store.findUnique({
           where: { id: store.id },
           include: this.storeInclude,
         });
+
+        return existing ? this.serializeStore(existing) : existing;
       }
 
       const creationCheck = await this.canCreateStore(user.accountId, tx);
@@ -225,7 +240,7 @@ export class StoreService {
 
       await this.updateOwnerBilling(user.accountId, tx);
 
-      return activatedStore;
+      return this.serializeStore(activatedStore);
     });
   }
 
@@ -237,11 +252,13 @@ export class StoreService {
     await this.assertCanManageStore(user, storeId);
     const updates = this.parseUpdateBody(body);
 
-    return this.prisma.store.update({
+    const store = await this.prisma.store.update({
       where: { id: storeId },
       data: updates,
       include: this.storeInclude,
     });
+
+    return this.serializeStore(store);
   }
 
   async remove(storeId: string, user: AuthTokenPayload) {
@@ -264,13 +281,15 @@ export class StoreService {
 
       await this.updateOwnerBilling(store.ownerId, tx);
 
-      return deletedStore;
+      return this.serializeStore(deletedStore);
     });
   }
 
   async myStores(user: AuthTokenPayload, includeInactive = false) {
+    let stores: StoreWithEntitlements[];
+
     if (user.type === StaffRole.owner) {
-      return this.prisma.store.findMany({
+      stores = await this.prisma.store.findMany({
         where: {
           ownerId: user.accountId,
           ...(includeInactive ? {} : { isActive: true }),
@@ -278,32 +297,104 @@ export class StoreService {
         orderBy: { createdAt: 'desc' },
         include: this.storeInclude,
       });
+    } else {
+      stores = await this.prisma.store.findMany({
+        where: {
+          isActive: true,
+          staff: { some: { staffId: user.staffId } },
+        },
+        orderBy: { createdAt: 'desc' },
+        include: this.storeInclude,
+      });
     }
 
-    return this.prisma.store.findMany({
-      where: {
-        isActive: true,
-        staff: { some: { staffId: user.staffId } },
-      },
-      orderBy: { createdAt: 'desc' },
-      include: this.storeInclude,
-    });
+    return stores.map((store) => this.serializeStore(store));
   }
 
   async findOne(storeId: string, user: AuthTokenPayload) {
     await this.access.ensureStoreAccess(storeId, user, 'view_store');
 
-    return this.prisma.store.findFirst({
+    const store = await this.prisma.store.findFirst({
       where: { id: storeId, isActive: true },
       include: this.storeInclude,
     });
+
+    return store ? this.serializeStore(store) : store;
+  }
+
+  async getFeatures(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'view_store');
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      include: this.storeEntitlementInclude,
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    return this.serializeCapabilities(store);
+  }
+
+  async updateFeatures(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.assertStoreOwner(storeId, user, 'Only owners can manage store features');
+    const updates = this.parseFeaturePatchBody(body);
+
+    if (!Object.keys(updates).length) {
+      throw new BadRequestException(
+        'At least one included store feature is required',
+      );
+    }
+
+    const store = await this.prisma.$transaction(async (tx) => {
+      await Promise.all(
+        Object.entries(updates).map(([feature, enabled]) =>
+          tx.storeFeature.upsert({
+            where: {
+              storeId_feature: {
+                storeId,
+                feature: feature as StoreFeatureKey,
+              },
+            },
+            create: {
+              storeId,
+              feature: feature as StoreFeatureKey,
+              enabled,
+              source: StoreFeatureSource.manual,
+            },
+            update: {
+              enabled,
+              source: StoreFeatureSource.manual,
+            },
+          }),
+        ),
+      );
+
+      return tx.store.findUnique({
+        where: { id: storeId },
+        include: this.storeEntitlementInclude,
+      });
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    return this.serializeCapabilities(store);
   }
 
   private parseCreateBody(body: Record<string, unknown>) {
+    const features = this.parseFeatureSelection(body);
+
     return {
       name: this.requiredString(body.name, 'name'),
       address: this.optionalString(body.address, 'address'),
       businessType: this.requiredBusinessType(body.businessType),
+      features,
     };
   }
 
@@ -369,6 +460,127 @@ export class StoreService {
     return value as StoreBusinessType;
   }
 
+  private parseFeatureSelection(body: Record<string, unknown>) {
+    const selected = new Set<StoreFeatureKey>();
+
+    if (Array.isArray(body.features)) {
+      for (const value of body.features) {
+        selected.add(this.requiredIncludedFeatureKey(value));
+      }
+    }
+
+    if (body.lotteryEnabled !== undefined) {
+      this.addBooleanFeature(
+        selected,
+        StoreFeatureKey.lottery,
+        body.lotteryEnabled,
+        'lotteryEnabled',
+      );
+    }
+
+    if (body.recipeSuiteEnabled !== undefined) {
+      this.addBooleanFeature(
+        selected,
+        StoreFeatureKey.recipe_suite,
+        body.recipeSuiteEnabled,
+        'recipeSuiteEnabled',
+      );
+    }
+
+    return [...selected];
+  }
+
+  private parseFeaturePatchBody(body: Record<string, unknown>) {
+    const updates: Partial<Record<StoreFeatureKey, boolean>> = {};
+
+    if (body.features !== undefined) {
+      throw new BadRequestException(
+        'features array is only supported during store creation',
+      );
+    }
+
+    if (body.loyalty !== undefined || body.loyaltyEnabled !== undefined) {
+      throw new BadRequestException(
+        'Loyalty is managed by the billing service subscription',
+      );
+    }
+
+    if (body.lottery !== undefined) {
+      updates[StoreFeatureKey.lottery] = this.requiredBoolean(
+        body.lottery,
+        'lottery',
+      );
+    }
+
+    if (body.recipeSuite !== undefined) {
+      updates[StoreFeatureKey.recipe_suite] = this.requiredBoolean(
+        body.recipeSuite,
+        'recipeSuite',
+      );
+    }
+
+    if (body.lotteryEnabled !== undefined) {
+      updates[StoreFeatureKey.lottery] = this.requiredBoolean(
+        body.lotteryEnabled,
+        'lotteryEnabled',
+      );
+    }
+
+    if (body.recipeSuiteEnabled !== undefined) {
+      updates[StoreFeatureKey.recipe_suite] = this.requiredBoolean(
+        body.recipeSuiteEnabled,
+        'recipeSuiteEnabled',
+      );
+    }
+
+    for (const key of Object.keys(body)) {
+      if (!this.allowedFeaturePatchKeys.has(key)) {
+        throw new BadRequestException(`Unknown store feature key: ${key}`);
+      }
+    }
+
+    return updates;
+  }
+
+  private addBooleanFeature(
+    selected: Set<StoreFeatureKey>,
+    feature: StoreFeatureKey,
+    value: unknown,
+    field: string,
+  ) {
+    if (this.requiredBoolean(value, field)) {
+      selected.add(feature);
+    } else {
+      selected.delete(feature);
+    }
+  }
+
+  private requiredIncludedFeatureKey(value: unknown) {
+    if (value === StoreFeatureKey.lottery || value === 'lottery') {
+      return StoreFeatureKey.lottery;
+    }
+
+    if (value === StoreFeatureKey.recipe_suite || value === 'recipe_suite') {
+      return StoreFeatureKey.recipe_suite;
+    }
+
+    if (value === StoreFeatureKey.loyalty || value === 'loyalty') {
+      throw new BadRequestException(
+        'Loyalty cannot be enabled during store setup',
+      );
+    }
+
+    throw new BadRequestException(`Unknown store feature: ${String(value)}`);
+  }
+
+  private requiredBoolean(value: unknown, field: string) {
+    if (typeof value !== 'boolean') {
+      throw new BadRequestException(`${field} must be a boolean`);
+    }
+
+    return value;
+  }
+
   getPlanMonthlyPrice(plan: SubscriptionPlan) {
     switch (plan) {
       case SubscriptionPlan.plus:
@@ -410,6 +622,29 @@ export class StoreService {
     }
   }
 
+  private async assertStoreOwner(
+    storeId: string,
+    user: AuthTokenPayload,
+    message: string,
+  ) {
+    if (user.type !== StaffRole.owner) {
+      throw new ForbiddenException(message);
+    }
+
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { ownerId: true },
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    if (store.ownerId !== user.accountId) {
+      throw new ForbiddenException(message);
+    }
+  }
+
   private requiredSubscriptionPlan(value: unknown) {
     if (typeof value !== 'string' || !value.trim()) {
       throw new BadRequestException('plan is required');
@@ -422,6 +657,75 @@ export class StoreService {
     return value as SubscriptionPlan;
   }
 
+  private serializeStore(store: StoreWithEntitlements) {
+    return {
+      ...store,
+      capabilities: this.serializeCapabilities(store).features,
+    };
+  }
+
+  private serializeCapabilities(store: StoreEntitlementState) {
+    const features = Array.isArray(store.features) ? store.features : [];
+    const serviceSubscriptions = Array.isArray(store.serviceSubscriptions)
+      ? store.serviceSubscriptions
+      : [];
+    const featureMap = new Map(features.map((feature) => [feature.feature, feature]));
+    const serviceMap = new Map(
+      serviceSubscriptions.map((service) => [service.service, service]),
+    );
+    const lottery = featureMap.get(StoreFeatureKey.lottery);
+    const recipeSuite = featureMap.get(StoreFeatureKey.recipe_suite);
+    const loyaltyService = serviceMap.get(StoreServiceKey.loyalty);
+    const loyaltyEnabled = Boolean(
+      loyaltyService && this.isActiveServiceStatus(loyaltyService.status),
+    );
+
+    return {
+      storeId: store.id,
+      features: {
+        lottery: {
+          enabled: lottery?.enabled === true,
+          available: lottery?.enabled === true,
+          source: lottery?.source ?? StoreFeatureSource.setup,
+        },
+        recipeSuite: {
+          enabled: recipeSuite?.enabled === true,
+          available: recipeSuite?.enabled === true,
+          source: recipeSuite?.source ?? StoreFeatureSource.setup,
+        },
+        loyalty: {
+          enabled: loyaltyEnabled,
+          available: loyaltyEnabled,
+          source: StoreFeatureSource.subscription,
+          billingStatus: loyaltyService?.status ?? StoreServiceStatus.not_added,
+        },
+      },
+    };
+  }
+
+  private isActiveServiceStatus(status: StoreServiceStatus) {
+    return status === StoreServiceStatus.active;
+  }
+
+  private readonly includedFeatureKeys = [
+    StoreFeatureKey.lottery,
+    StoreFeatureKey.recipe_suite,
+  ];
+
+  private readonly allowedFeaturePatchKeys = new Set([
+    'lottery',
+    'recipeSuite',
+    'lotteryEnabled',
+    'recipeSuiteEnabled',
+    'loyalty',
+    'loyaltyEnabled',
+  ]);
+
+  private readonly storeEntitlementInclude = {
+    features: true,
+    serviceSubscriptions: true,
+  } satisfies Prisma.StoreInclude;
+
   private readonly storeInclude = {
     departments: true,
     priceGroups: true,
@@ -429,5 +733,27 @@ export class StoreService {
     taxes: true,
     products: true,
     staff: true,
+    features: true,
+    serviceSubscriptions: true,
   } satisfies Prisma.StoreInclude;
 }
+
+type StoreEntitlementState = Prisma.StoreGetPayload<{
+  include: {
+    features: true;
+    serviceSubscriptions: true;
+  };
+}>;
+
+type StoreWithEntitlements = Prisma.StoreGetPayload<{
+  include: {
+    departments: true;
+    priceGroups: true;
+    productCategories: true;
+    taxes: true;
+    products: true;
+    staff: true;
+    features: true;
+    serviceSubscriptions: true;
+  };
+}>;

@@ -11,6 +11,10 @@ import { ConfigService } from '@nestjs/config';
 import {
   Prisma,
   StaffRole,
+  StoreFeatureKey,
+  StoreFeatureSource,
+  StoreServiceKey,
+  StoreServiceStatus,
   StoreSubscription,
   StoreSubscriptionStatus,
   SubscriptionPlan,
@@ -22,6 +26,7 @@ import { PrismaService } from '../prisma.service';
 import { StoreService } from '../store/store.service';
 
 type CheckoutPlan = 'PLUS' | 'ADVANCED';
+type PaidStoreService = 'LOYALTY';
 const BLOCKED_CHECKOUT_STATUSES = new Set<StoreSubscriptionStatus>([
   StoreSubscriptionStatus.active,
   StoreSubscriptionStatus.trialing,
@@ -83,6 +88,177 @@ export class BillingService {
       isActive: store.isActive,
       subscriptionStatus: store.storeSubscription?.status ?? null,
       plan: store.storeSubscription?.plan ?? null,
+    };
+  }
+
+  async getStoreServices(storeId: string, user: AuthTokenPayload) {
+    const store = await this.getOwnerStoreWithSubscription(storeId, user);
+    const loyalty = store.serviceSubscriptions.find(
+      (service) => service.service === StoreServiceKey.loyalty,
+    );
+
+    return {
+      storeId: store.id,
+      services: {
+        loyalty: this.serializeService(loyalty),
+      },
+    };
+  }
+
+  async getStoreBillingSummary(storeId: string, user: AuthTokenPayload) {
+    const store = await this.getOwnerStoreWithSubscription(storeId, user);
+    const base = store.storeSubscription;
+    const loyalty = store.serviceSubscriptions.find(
+      (service) => service.service === StoreServiceKey.loyalty,
+    );
+    const baseAmount = base ? this.storeService.getPlanMonthlyPrice(base.plan) : 0;
+    const loyaltyActive =
+      loyalty?.status === StoreServiceStatus.active &&
+      loyalty.stripePriceId === this.optionalConfig('STRIPE_LOYALTY_PRICE_ID');
+    const loyaltyAmount = loyaltyActive ? 49 : 0;
+
+    return {
+      storeId: store.id,
+      basePlan: base?.plan ?? null,
+      baseMonthlyAmount: baseAmount,
+      loyalty: this.serializeService(loyalty),
+      loyaltyMonthlyAmount: loyaltyAmount,
+      estimatedMonthlyTotal: baseAmount + loyaltyAmount,
+      subscriptionStatus: base?.status ?? null,
+      nextBillingDate: base?.currentPeriodEnd ?? null,
+      cancelAtPeriodEnd: base?.cancelAtPeriodEnd ?? false,
+    };
+  }
+
+  async addStoreService(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    this.assertService(body.service, 'LOYALTY');
+    const store = await this.getOwnerStoreWithSubscription(storeId, user);
+    const baseSubscription = store.storeSubscription;
+
+    if (
+      !baseSubscription?.stripeSubscriptionId ||
+      !this.isUsableStatus(baseSubscription.status)
+    ) {
+      throw new BadRequestException(
+        'Store must have an active Stripe subscription before adding Loyalty',
+      );
+    }
+
+    const existing = store.serviceSubscriptions.find(
+      (service) => service.service === StoreServiceKey.loyalty,
+    );
+
+    if (
+      existing &&
+      (existing.status === StoreServiceStatus.active ||
+        existing.status === StoreServiceStatus.pending ||
+        existing.status === StoreServiceStatus.incomplete)
+    ) {
+      throw new BadRequestException('Loyalty is already active or pending');
+    }
+
+    const loyaltyPriceId = this.requiredPriceConfig('STRIPE_LOYALTY_PRICE_ID');
+    const serviceRecord = await this.prisma.storeServiceSubscription.upsert({
+      where: {
+        storeId_service: {
+          storeId: store.id,
+          service: StoreServiceKey.loyalty,
+        },
+      },
+      create: {
+        storeId: store.id,
+        service: StoreServiceKey.loyalty,
+        status: StoreServiceStatus.pending,
+        stripeSubscriptionId: baseSubscription.stripeSubscriptionId,
+        stripePriceId: loyaltyPriceId,
+      },
+      update: {
+        status: StoreServiceStatus.pending,
+        stripeSubscriptionId: baseSubscription.stripeSubscriptionId,
+        stripePriceId: loyaltyPriceId,
+        cancelAtPeriodEnd: false,
+      },
+    });
+
+    const item = await this.getStripe().subscriptionItems.create(
+      {
+        subscription: baseSubscription.stripeSubscriptionId,
+        price: loyaltyPriceId,
+        quantity: 1,
+        proration_behavior: 'create_prorations',
+        metadata: {
+          storeId: store.id,
+          service: 'LOYALTY',
+        },
+      },
+      {
+        idempotencyKey: `store-service:${store.id}:loyalty:add:${serviceRecord.id}`,
+      },
+    );
+
+    const updatedService = await this.prisma.storeServiceSubscription.update({
+      where: { id: serviceRecord.id },
+      data: {
+        stripeSubscriptionItemId: item.id,
+        stripeSubscriptionId: baseSubscription.stripeSubscriptionId,
+        stripePriceId: loyaltyPriceId,
+      },
+    });
+
+    return {
+      storeId: store.id,
+      service: this.serializeService(updatedService),
+    };
+  }
+
+  async removeStoreService(storeId: string, user: AuthTokenPayload) {
+    const store = await this.getOwnerStoreWithSubscription(storeId, user);
+    const loyalty = store.serviceSubscriptions.find(
+      (service) => service.service === StoreServiceKey.loyalty,
+    );
+
+    if (!loyalty || !loyalty.stripeSubscriptionItemId) {
+      throw new BadRequestException('Loyalty is not active for this store');
+    }
+
+    await this.getStripe().subscriptionItems.del(loyalty.stripeSubscriptionItemId, {
+      proration_behavior: 'create_prorations',
+    });
+
+    const updated = await this.prisma.storeServiceSubscription.update({
+      where: { id: loyalty.id },
+      data: {
+        status: StoreServiceStatus.canceled,
+        cancelAtPeriodEnd: false,
+      },
+    });
+
+    await this.prisma.storeFeature.upsert({
+      where: {
+        storeId_feature: {
+          storeId: store.id,
+          feature: StoreFeatureKey.loyalty,
+        },
+      },
+      create: {
+        storeId: store.id,
+        feature: StoreFeatureKey.loyalty,
+        enabled: false,
+        source: StoreFeatureSource.subscription,
+      },
+      update: {
+        enabled: false,
+        source: StoreFeatureSource.subscription,
+      },
+    });
+
+    return {
+      storeId: store.id,
+      service: this.serializeService(updated),
     };
   }
 
@@ -396,12 +572,28 @@ export class BillingService {
       return;
     }
 
+    const priceIds = subscription.items.data
+      .map((item) => item.price.id)
+      .filter((priceId): priceId is string => Boolean(priceId));
+    const basePriceId = this.findBasePriceId(priceIds);
     const plan =
       this.metadataPlan(subscription.metadata?.plan) ??
-      this.planFromPrice(subscription.items.data[0]?.price.id);
+      this.planFromPrice(basePriceId);
+
+    if (!plan) {
+      this.logger.warn(
+        `Stripe subscription ${subscription.id} has no recognized base plan price`,
+      );
+      return;
+    }
+
     const status = this.mapStripeStatus(subscription.status);
     const usable = this.isUsableStatus(status);
-    const priceId = subscription.items.data[0]?.price.id;
+    const priceId = basePriceId;
+    const loyaltyPriceId = this.optionalConfig('STRIPE_LOYALTY_PRICE_ID');
+    const loyaltyItem = loyaltyPriceId
+      ? subscription.items.data.find((item) => item.price.id === loyaltyPriceId)
+      : undefined;
     const subscriptionWithPeriods = subscription as Stripe.Subscription & {
       current_period_start?: number;
       current_period_end?: number;
@@ -444,6 +636,14 @@ export class BillingService {
       where: { id: storeId },
       data: { isActive: usable },
     });
+
+    await this.syncLoyaltyEntitlement(
+      storeId,
+      subscription,
+      loyaltyItem,
+      usable,
+      tx,
+    );
 
     const store = await tx.store.findUnique({
       where: { id: storeId },
@@ -566,11 +766,28 @@ export class BillingService {
   }
 
   private planFromPrice(priceId?: string) {
+    if (priceId === this.optionalConfig('STRIPE_PLUS_PRICE_ID')) {
+      return SubscriptionPlan.plus;
+    }
+
     if (priceId === this.optionalConfig('STRIPE_ADVANCED_PRICE_ID')) {
       return SubscriptionPlan.advanced;
     }
 
-    return SubscriptionPlan.plus;
+    if (priceId) {
+      this.logger.warn(`Unknown Stripe base plan price ${priceId}`);
+    }
+
+    return null;
+  }
+
+  private findBasePriceId(priceIds: string[]) {
+    const plusPriceId = this.optionalConfig('STRIPE_PLUS_PRICE_ID');
+    const advancedPriceId = this.optionalConfig('STRIPE_ADVANCED_PRICE_ID');
+
+    return priceIds.find(
+      (priceId) => priceId === plusPriceId || priceId === advancedPriceId,
+    );
   }
 
   private mapStripeStatus(status: Stripe.Subscription.Status) {
@@ -602,6 +819,142 @@ export class BillingService {
     );
   }
 
+  private async syncLoyaltyEntitlement(
+    storeId: string,
+    subscription: Stripe.Subscription,
+    loyaltyItem: Stripe.SubscriptionItem | undefined,
+    subscriptionUsable: boolean,
+    tx: Prisma.TransactionClient,
+  ) {
+    const subscriptionWithPeriods = subscription as Stripe.Subscription & {
+      current_period_start?: number;
+      current_period_end?: number;
+    };
+    const status = subscriptionUsable && loyaltyItem
+      ? StoreServiceStatus.active
+      : StoreServiceStatus.canceled;
+    const serviceDelegate = (
+      tx as Prisma.TransactionClient & {
+        storeServiceSubscription?: Prisma.TransactionClient['storeServiceSubscription'];
+      }
+    ).storeServiceSubscription;
+
+    if (!serviceDelegate) {
+      return;
+    }
+
+    await serviceDelegate.upsert({
+      where: {
+        storeId_service: {
+          storeId,
+          service: StoreServiceKey.loyalty,
+        },
+      },
+      create: {
+        storeId,
+        service: StoreServiceKey.loyalty,
+        status,
+        stripeSubscriptionId: subscription.id,
+        stripeSubscriptionItemId: loyaltyItem?.id ?? null,
+        stripePriceId: loyaltyItem?.price.id ?? null,
+        currentPeriodStart: this.fromUnix(
+          subscriptionWithPeriods.current_period_start,
+        ),
+        currentPeriodEnd: this.fromUnix(
+          subscriptionWithPeriods.current_period_end,
+        ),
+        cancelAtPeriodEnd: subscription.cancel_at_period_end,
+      },
+      update: {
+        status,
+        stripeSubscriptionId: subscription.id,
+        stripeSubscriptionItemId: loyaltyItem?.id ?? null,
+        stripePriceId: loyaltyItem?.price.id ?? null,
+        currentPeriodStart: this.fromUnix(
+          subscriptionWithPeriods.current_period_start,
+        ),
+        currentPeriodEnd: this.fromUnix(
+          subscriptionWithPeriods.current_period_end,
+        ),
+        cancelAtPeriodEnd: subscription.cancel_at_period_end,
+      },
+    });
+
+    await tx.storeFeature.upsert({
+      where: {
+        storeId_feature: {
+          storeId,
+          feature: StoreFeatureKey.loyalty,
+        },
+      },
+      create: {
+        storeId,
+        feature: StoreFeatureKey.loyalty,
+        enabled: subscriptionUsable && Boolean(loyaltyItem),
+        source: StoreFeatureSource.subscription,
+      },
+      update: {
+        enabled: subscriptionUsable && Boolean(loyaltyItem),
+        source: StoreFeatureSource.subscription,
+      },
+    });
+  }
+
+  private async getOwnerStoreWithSubscription(
+    storeId: string,
+    user: AuthTokenPayload,
+  ) {
+    const normalizedStoreId = this.requiredString(storeId, 'storeId');
+
+    if (user.type !== StaffRole.owner) {
+      throw new ForbiddenException('Only owners can manage store services');
+    }
+
+    const store = await this.prisma.store.findUnique({
+      where: { id: normalizedStoreId },
+      include: {
+        storeSubscription: true,
+        serviceSubscriptions: true,
+      },
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    if (store.ownerId !== user.accountId) {
+      throw new ForbiddenException('You do not have access to this store');
+    }
+
+    return store;
+  }
+
+  private assertService(value: unknown, expected: PaidStoreService) {
+    if (value !== expected) {
+      throw new BadRequestException(`service must be ${expected}`);
+    }
+  }
+
+  private serializeService(
+    service?: {
+      service: StoreServiceKey;
+      status: StoreServiceStatus;
+      currentPeriodEnd?: Date | null;
+      cancelAtPeriodEnd?: boolean | null;
+    } | null,
+  ) {
+    return {
+      name: 'Loyalty',
+      description: 'Customer loyalty tools and rewards for this store.',
+      priceLabel: '$49 / store / month',
+      key: 'LOYALTY',
+      status: service?.status ?? StoreServiceStatus.not_added,
+      active: service?.status === StoreServiceStatus.active,
+      currentPeriodEnd: service?.currentPeriodEnd ?? null,
+      cancelAtPeriodEnd: service?.cancelAtPeriodEnd ?? false,
+    };
+  }
+
   private getFrontendUrl() {
     return (
       this.optionalConfig('BACKOFFICE_URL') ??
@@ -629,6 +982,18 @@ export class BillingService {
 
     if (!value) {
       throw new ServiceUnavailableException(`${key} is not configured`);
+    }
+
+    return value;
+  }
+
+  private requiredPriceConfig(key: string) {
+    const value = this.requiredConfig(key);
+
+    if (!value.startsWith('price_')) {
+      throw new ServiceUnavailableException(
+        `${key} must be a Stripe Price ID starting with price_`,
+      );
     }
 
     return value;

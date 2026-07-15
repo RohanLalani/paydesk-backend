@@ -44,6 +44,34 @@ enum StoreSubscriptionStatus {
   paused
 }
 
+enum StoreFeatureKey {
+  lottery
+  recipe_suite
+  loyalty
+}
+
+enum StoreFeatureSource {
+  setup
+  manual
+  subscription
+  system
+}
+
+enum StoreServiceKey {
+  loyalty
+}
+
+enum StoreServiceStatus {
+  not_added
+  pending
+  active
+  past_due
+  canceled
+  unpaid
+  incomplete
+  incomplete_expired
+}
+
 enum StoreBusinessType {
   convenience_store
   grocery_store
@@ -305,6 +333,8 @@ model Store {
   registerActivationCodes RegisterActivationCode[]
   registerDevices         RegisterDevice[]
   storeSubscription       StoreSubscription?
+  features                StoreFeature[]
+  serviceSubscriptions    StoreServiceSubscription[]
 
   @@index([ownerId, isActive])
 }
@@ -333,6 +363,41 @@ model StoreSubscription {
 
   @@index([status])
   @@index([stripeCustomerId])
+}
+
+model StoreFeature {
+  id        String             @id @default(uuid())
+  storeId   String
+  feature   StoreFeatureKey
+  enabled   Boolean            @default(false)
+  source    StoreFeatureSource
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, feature])
+  @@index([storeId, enabled])
+}
+
+model StoreServiceSubscription {
+  id                       String             @id @default(uuid())
+  storeId                  String
+  service                  StoreServiceKey
+  status                   StoreServiceStatus @default(pending)
+  stripeSubscriptionId     String?
+  stripeSubscriptionItemId String?            @unique
+  stripePriceId            String?
+  currentPeriodStart       DateTime?
+  currentPeriodEnd         DateTime?
+  cancelAtPeriodEnd        Boolean            @default(false)
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, service])
+  @@index([storeId, status])
 }
 
 model StripeWebhookEvent {
