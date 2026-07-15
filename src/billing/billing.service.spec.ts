@@ -8,6 +8,7 @@ import {
   BillingCycle,
   StaffRole,
   StoreBusinessType,
+  StoreServiceStatus,
   StoreSubscriptionStatus,
   SubscriptionPlan,
   SubscriptionStatus,
@@ -369,6 +370,104 @@ describe('BillingService Stripe checkout', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
+  it('rejects Loyalty add-on requests without explicit charge confirmation', async () => {
+    await expect(
+      service.addStoreService('store-1', { service: 'LOYALTY' }, ownerUser),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(stripe.subscriptionItems.create).not.toHaveBeenCalled();
+    expect(prisma.storeServiceSubscription.upsert).not.toHaveBeenCalled();
+  });
+
+  it('adds Loyalty to the existing Stripe subscription after confirmation', async () => {
+    prisma.store.findUnique.mockResolvedValue(
+      storeFixture({
+        storeSubscription: storeSubscriptionFixture({
+          status: StoreSubscriptionStatus.active,
+          stripeSubscriptionId: 'sub_existing',
+        }),
+        serviceSubscriptions: [],
+      }),
+    );
+
+    await service.addStoreService(
+      'store-1',
+      { service: 'LOYALTY', confirmed: true },
+      ownerUser,
+    );
+
+    expect(stripe.customers.create).not.toHaveBeenCalled();
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+    expect(stripe.subscriptionItems.create).toHaveBeenCalledTimes(1);
+    expect(stripe.subscriptionItems.create).toHaveBeenCalledWith(
+      {
+        subscription: 'sub_existing',
+        price: 'price_loyalty',
+        quantity: 1,
+        proration_behavior: 'create_prorations',
+        metadata: {
+          storeId: 'store-1',
+          service: 'LOYALTY',
+        },
+      },
+      expect.objectContaining({
+        idempotencyKey: expect.stringMatching(
+          /^store-service:store-1:loyalty:add:/,
+        ),
+      }),
+    );
+    expect(prisma.storeServiceSubscription.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          service: 'loyalty',
+          status: StoreServiceStatus.pending,
+          stripeSubscriptionId: 'sub_existing',
+          stripePriceId: 'price_loyalty',
+        }),
+      }),
+    );
+    expect(prisma.storeServiceSubscription.update).toHaveBeenCalledWith({
+      where: { id: 'service-1' },
+      data: {
+        stripeSubscriptionId: 'sub_existing',
+        stripeSubscriptionItemId: 'si_loyalty',
+        stripePriceId: 'price_loyalty',
+      },
+    });
+  });
+
+  it('prevents duplicate active Loyalty add-on requests', async () => {
+    prisma.store.findUnique.mockResolvedValue(
+      storeFixture({
+        storeSubscription: storeSubscriptionFixture({
+          status: StoreSubscriptionStatus.active,
+          stripeSubscriptionId: 'sub_existing',
+        }),
+        serviceSubscriptions: [
+          {
+            id: 'service-1',
+            storeId: 'store-1',
+            service: 'loyalty',
+            status: StoreServiceStatus.active,
+            stripeSubscriptionId: 'sub_existing',
+            stripeSubscriptionItemId: 'si_loyalty',
+            stripePriceId: 'price_loyalty',
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      service.addStoreService(
+        'store-1',
+        { service: 'LOYALTY', confirmed: true },
+        ownerUser,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(stripe.subscriptionItems.create).not.toHaveBeenCalled();
+  });
+
   it('accepts valid webhook signatures', async () => {
     stripe.webhooks.constructEvent.mockReturnValue(
       stripeEvent('noop.event', {}),
@@ -487,6 +586,21 @@ function createMockPrisma(): MockPrisma {
       upsert: jest.fn(),
       update: jest.fn(),
     },
+    storeServiceSubscription: {
+      upsert: jest.fn().mockResolvedValue({
+        id: 'service-1',
+        storeId: 'store-1',
+        service: 'loyalty',
+        status: StoreServiceStatus.pending,
+        stripeSubscriptionId: 'sub_existing',
+        stripeSubscriptionItemId: 'si_loyalty',
+        stripePriceId: 'price_loyalty',
+      }),
+      update: jest.fn(),
+    },
+    storeFeature: {
+      upsert: jest.fn(),
+    },
     stripeWebhookEvent: {
       findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn(),
@@ -530,6 +644,10 @@ function createMockStripe(): MockStripe {
     subscriptions: {
       retrieve: jest.fn().mockResolvedValue(subscriptionFixture('active')),
     },
+    subscriptionItems: {
+      create: jest.fn().mockResolvedValue({ id: 'si_loyalty' }),
+      del: jest.fn(),
+    },
   };
 }
 
@@ -539,6 +657,7 @@ function mockConfig(overrides: Record<string, string> = {}) {
     STRIPE_WEBHOOK_SECRET: 'whsec_123',
     STRIPE_PLUS_PRICE_ID: 'price_plus',
     STRIPE_ADVANCED_PRICE_ID: 'price_advanced',
+    STRIPE_LOYALTY_PRICE_ID: 'price_loyalty',
     BACKOFFICE_URL: 'http://localhost:3000',
     ...overrides,
   };
@@ -562,6 +681,7 @@ function storeFixture(overrides: Record<string, unknown> = {}) {
       name: 'Owner',
     },
     storeSubscription: null,
+    serviceSubscriptions: [],
     ...overrides,
   };
 }
@@ -632,6 +752,7 @@ type MockStripe = {
   checkout: { sessions: { create: jest.Mock; retrieve: jest.Mock } };
   webhooks: { constructEvent: jest.Mock };
   subscriptions: { retrieve: jest.Mock };
+  subscriptionItems: { create: jest.Mock; del: jest.Mock };
 };
 
 type MockPrisma = {
@@ -644,6 +765,13 @@ type MockPrisma = {
     findUnique: jest.Mock;
     upsert: jest.Mock;
     update: jest.Mock;
+  };
+  storeServiceSubscription: {
+    upsert: jest.Mock;
+    update: jest.Mock;
+  };
+  storeFeature: {
+    upsert: jest.Mock;
   };
   stripeWebhookEvent: {
     findUnique: jest.Mock;

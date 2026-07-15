@@ -549,7 +549,7 @@ model SubscriptionAddon {
 
 model Product {
   id                             String          @id @default(uuid())
-  barcode                        String          @unique
+  barcode                        String
   name                           String
   saleType                       ProductSaleType
   currentQuantity                Int             @default(0)
@@ -590,11 +590,11 @@ model Product {
   departmentId String
   department   Department @relation(fields: [departmentId], references: [id])
 
-  priceGroupId String
-  priceGroup   PriceGroup @relation(fields: [priceGroupId], references: [id])
+  priceGroupId String?
+  priceGroup   PriceGroup? @relation(fields: [priceGroupId], references: [id])
 
-  productCategoryId String
-  productCategory   ProductCategory @relation(fields: [productCategoryId], references: [id])
+  productCategoryId String?
+  productCategory   ProductCategory? @relation(fields: [productCategoryId], references: [id])
 
   taxId String
   tax   Tax    @relation(fields: [taxId], references: [id])
@@ -603,6 +603,7 @@ model Product {
   transactionItems TransactionItem[]
   cartItems        CartItem[]
 
+  @@unique([storeId, barcode])
   @@index([storeId, isActive])
   @@index([departmentId])
   @@index([priceGroupId])

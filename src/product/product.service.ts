@@ -363,6 +363,14 @@ export class ProductService {
     }
   }
 
+  createForStore(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    return this.create({ ...body, storeId }, user);
+  }
+
   async update(
     productId: string,
     body: Record<string, unknown>,
@@ -429,6 +437,21 @@ export class ProductService {
     }
   }
 
+  async updateForStore(
+    storeId: string,
+    productId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    const product = await this.findActiveProductOrThrow(productId);
+
+    if (product.storeId !== storeId) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return this.update(productId, body, user);
+  }
+
   async findOne(productId: string, user: AuthTokenPayload) {
     const product = await this.findActiveProductOrThrow(productId);
     await this.access.ensureStoreAccess(
@@ -462,7 +485,7 @@ export class ProductService {
     const product = await this.prisma.product.findFirst({
       where: {
         storeId,
-        barcode: this.requiredString(barcode, 'barcode'),
+        barcode: this.validateBarcode(barcode),
         isActive: true,
       },
       include: this.productInclude,
@@ -773,8 +796,8 @@ export class ProductService {
     storeId: string,
     ids: {
       departmentId: string;
-      priceGroupId: string;
-      productCategoryId: string;
+      priceGroupId?: string | null;
+      productCategoryId?: string | null;
       taxId: string;
     },
   ) {
@@ -783,10 +806,14 @@ export class ProductService {
         where: { id: ids.departmentId, storeId, isActive: true },
       }),
       this.prisma.priceGroup.findFirst({
-        where: { id: ids.priceGroupId, storeId, isActive: true },
+        where: ids.priceGroupId
+          ? { id: ids.priceGroupId, storeId, isActive: true }
+          : { id: '__optional_price_group_not_selected__' },
       }),
       this.prisma.productCategory.findFirst({
-        where: { id: ids.productCategoryId, storeId, isActive: true },
+        where: ids.productCategoryId
+          ? { id: ids.productCategoryId, storeId, isActive: true }
+          : { id: '__optional_category_not_selected__' },
       }),
       this.prisma.tax.findFirst({
         where: { id: ids.taxId, storeId, isActive: true },
@@ -799,13 +826,13 @@ export class ProductService {
       );
     }
 
-    if (!priceGroup) {
+    if (ids.priceGroupId && !priceGroup) {
       throw new BadRequestException(
         'priceGroupId must belong to the product store',
       );
     }
 
-    if (!productCategory) {
+    if (ids.productCategoryId && !productCategory) {
       throw new BadRequestException(
         'productCategoryId must belong to the product store',
       );
@@ -923,18 +950,18 @@ export class ProductService {
   private parseCreateBody(body: Record<string, unknown>): ProductCreateDto {
     return {
       storeId: this.requiredString(body.storeId, 'storeId'),
-      barcode: this.requiredString(body.barcode, 'barcode'),
+      barcode: this.validateBarcode(body.barcode),
       name: this.requiredString(body.name, 'name'),
       departmentId: this.requiredString(body.departmentId, 'departmentId'),
-      priceGroupId: this.requiredString(body.priceGroupId, 'priceGroupId'),
-      productCategoryId: this.requiredString(
+      priceGroupId: this.optionalString(body.priceGroupId, 'priceGroupId'),
+      productCategoryId: this.optionalString(
         body.productCategoryId,
         'productCategoryId',
       ),
       saleType: this.requiredEnum(body.saleType, 'saleType', ProductSaleType),
       currentQuantity:
         this.optionalInt(body.currentQuantity, 'currentQuantity') ?? 0,
-      unitsPerCase: this.optionalPositiveInt(body.unitsPerCase, 'unitsPerCase'),
+      unitsPerCase: this.requiredPositiveInt(body.unitsPerCase, 'unitsPerCase'),
       caseCost: this.optionalNumber(body.caseCost, 'caseCost'),
       caseDiscount: this.optionalNumber(body.caseDiscount, 'caseDiscount') ?? 0,
       caseRebate: this.optionalNumber(body.caseRebate, 'caseRebate') ?? 0,
@@ -978,7 +1005,7 @@ export class ProductService {
     const updates: ProductUpdateDto = {};
 
     if (body.barcode !== undefined)
-      updates.barcode = this.requiredString(body.barcode, 'barcode');
+      updates.barcode = this.validateBarcode(body.barcode);
     if (body.name !== undefined)
       updates.name = this.requiredString(body.name, 'name');
     if (body.departmentId !== undefined)
@@ -987,12 +1014,12 @@ export class ProductService {
         'departmentId',
       );
     if (body.priceGroupId !== undefined)
-      updates.priceGroupId = this.requiredString(
+      updates.priceGroupId = this.optionalString(
         body.priceGroupId,
         'priceGroupId',
       );
     if (body.productCategoryId !== undefined)
-      updates.productCategoryId = this.requiredString(
+      updates.productCategoryId = this.optionalString(
         body.productCategoryId,
         'productCategoryId',
       );
@@ -1008,7 +1035,7 @@ export class ProductService {
         'currentQuantity',
       );
     if (body.unitsPerCase !== undefined)
-      updates.unitsPerCase = this.optionalPositiveInt(
+      updates.unitsPerCase = this.requiredPositiveInt(
         body.unitsPerCase,
         'unitsPerCase',
       );
@@ -1116,6 +1143,47 @@ export class ProductService {
     }
 
     return value.trim();
+  }
+
+  private validateBarcode(value: unknown) {
+    const barcode = this.requiredString(value, 'barcode').replace(
+      /[\r\n\t]+$/g,
+      '',
+    );
+
+    if (barcode.length > 64) {
+      throw new BadRequestException('barcode must be 64 characters or fewer');
+    }
+
+    if (/\s/.test(barcode)) {
+      throw new BadRequestException('barcode cannot contain spaces');
+    }
+
+    if (!/^[\x21-\x7e]+$/.test(barcode)) {
+      throw new BadRequestException('barcode contains unsupported characters');
+    }
+
+    if (/^\d+$/.test(barcode) && [8, 12, 13].includes(barcode.length)) {
+      const digits = [...barcode].map((digit) => Number(digit));
+      const checkDigit = digits.at(-1);
+      const body = digits.slice(0, -1);
+      const sum = body
+        .slice()
+        .reverse()
+        .reduce(
+          (total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1),
+          0,
+        );
+      const expected = (10 - (sum % 10)) % 10;
+
+      if (checkDigit !== expected) {
+        throw new BadRequestException(
+          'barcode has an invalid UPC/EAN check digit',
+        );
+      }
+    }
+
+    return barcode;
   }
 
   private optionalString(value: unknown, field: string) {
@@ -1277,7 +1345,9 @@ export class ProductService {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === 'P2002'
     ) {
-      throw new ConflictException('A product with that barcode already exists');
+      throw new ConflictException(
+        'An item with this barcode already exists in this store.',
+      );
     }
   }
 
@@ -1312,8 +1382,8 @@ type ProductCreateDto = ProductCalculationInput & {
   barcode: string;
   name: string;
   departmentId: string;
-  priceGroupId: string;
-  productCategoryId: string;
+  priceGroupId: string | null;
+  productCategoryId: string | null;
   saleType: ProductSaleType;
   currentQuantity: number;
   onlineRetailPrice: number | null;

@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -159,6 +160,30 @@ export class ProductController {
     return this.productService.create(body, request.user);
   }
 
+  @Post('stores/:storeId/products')
+  createForStore(
+    @Param('storeId') storeId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.createForStore(storeId, body, request.user);
+  }
+
+  @Patch('stores/:storeId/products/:productId')
+  updateForStore(
+    @Param('storeId') storeId: string,
+    @Param('productId') productId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.updateForStore(
+      storeId,
+      productId,
+      body,
+      request.user,
+    );
+  }
+
   @Patch(':productId')
   update(
     @Param('productId') productId: string,
@@ -183,6 +208,29 @@ export class ProductController {
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.productService.findByBarcode(storeId, barcode, request.user);
+  }
+
+  @Get('stores/:storeId/products/barcode/:barcode')
+  async findByStoreBarcode(
+    @Param('storeId') storeId: string,
+    @Param('barcode') barcode: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    try {
+      const product = await this.productService.findByBarcode(
+        storeId,
+        barcode,
+        request.user,
+      );
+
+      return { found: true, product };
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        return { found: false, barcode };
+      }
+
+      throw error;
+    }
   }
 
   @Post('inventory/receive')

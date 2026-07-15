@@ -87,11 +87,12 @@ export class BillingController {
   @UseGuards(JwtAuthGuard)
   addLoyaltyService(
     @Param('storeId') storeId: string,
+    @Body() body: Record<string, unknown>,
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.billingService.addStoreService(
       storeId,
-      { service: 'LOYALTY' },
+      { service: 'LOYALTY', confirmed: body.confirmed },
       request.user,
     );
   }

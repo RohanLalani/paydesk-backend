@@ -341,7 +341,11 @@ export class StoreService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    await this.assertStoreOwner(storeId, user, 'Only owners can manage store features');
+    await this.assertStoreOwner(
+      storeId,
+      user,
+      'Only owners can manage store features',
+    );
     const updates = this.parseFeaturePatchBody(body);
 
     if (!Object.keys(updates).length) {
@@ -669,7 +673,9 @@ export class StoreService {
     const serviceSubscriptions = Array.isArray(store.serviceSubscriptions)
       ? store.serviceSubscriptions
       : [];
-    const featureMap = new Map(features.map((feature) => [feature.feature, feature]));
+    const featureMap = new Map(
+      features.map((feature) => [feature.feature, feature]),
+    );
     const serviceMap = new Map(
       serviceSubscriptions.map((service) => [service.service, service]),
     );

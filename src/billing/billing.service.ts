@@ -111,7 +111,9 @@ export class BillingService {
     const loyalty = store.serviceSubscriptions.find(
       (service) => service.service === StoreServiceKey.loyalty,
     );
-    const baseAmount = base ? this.storeService.getPlanMonthlyPrice(base.plan) : 0;
+    const baseAmount = base
+      ? this.storeService.getPlanMonthlyPrice(base.plan)
+      : 0;
     const loyaltyActive =
       loyalty?.status === StoreServiceStatus.active &&
       loyalty.stripePriceId === this.optionalConfig('STRIPE_LOYALTY_PRICE_ID');
@@ -136,6 +138,7 @@ export class BillingService {
     user: AuthTokenPayload,
   ) {
     this.assertService(body.service, 'LOYALTY');
+    this.assertConfirmed(body.confirmed);
     const store = await this.getOwnerStoreWithSubscription(storeId, user);
     const baseSubscription = store.storeSubscription;
 
@@ -225,9 +228,12 @@ export class BillingService {
       throw new BadRequestException('Loyalty is not active for this store');
     }
 
-    await this.getStripe().subscriptionItems.del(loyalty.stripeSubscriptionItemId, {
-      proration_behavior: 'create_prorations',
-    });
+    await this.getStripe().subscriptionItems.del(
+      loyalty.stripeSubscriptionItemId,
+      {
+        proration_behavior: 'create_prorations',
+      },
+    );
 
     const updated = await this.prisma.storeServiceSubscription.update({
       where: { id: loyalty.id },
@@ -830,9 +836,10 @@ export class BillingService {
       current_period_start?: number;
       current_period_end?: number;
     };
-    const status = subscriptionUsable && loyaltyItem
-      ? StoreServiceStatus.active
-      : StoreServiceStatus.canceled;
+    const status =
+      subscriptionUsable && loyaltyItem
+        ? StoreServiceStatus.active
+        : StoreServiceStatus.canceled;
     const serviceDelegate = (
       tx as Prisma.TransactionClient & {
         storeServiceSubscription?: Prisma.TransactionClient['storeServiceSubscription'];
@@ -932,6 +939,12 @@ export class BillingService {
   private assertService(value: unknown, expected: PaidStoreService) {
     if (value !== expected) {
       throw new BadRequestException(`service must be ${expected}`);
+    }
+  }
+
+  private assertConfirmed(value: unknown) {
+    if (value !== true) {
+      throw new BadRequestException('Service charge confirmation is required');
     }
   }
 
