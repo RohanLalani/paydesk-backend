@@ -110,6 +110,21 @@ enum ProductSaleType {
   other
 }
 
+enum DepartmentType {
+  merchandise
+  lottery
+  fuel
+  misc_services
+}
+
+enum DepartmentMinimumAge {
+  none
+  age_18
+  age_18_time_sensitive
+  age_21
+  age_21_time_sensitive
+}
+
 enum TaxStyle {
   pre_discount
   post_discount
@@ -612,20 +627,37 @@ model Product {
 }
 
 model Department {
-  id              String   @id @default(uuid())
-  name            String
-  defaultAllowEbt Boolean  @default(false)
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                          String               @id @default(uuid())
+  name                        String
+  posDepartmentNumber         Int
+  type                        DepartmentType       @default(merchandise)
+  minimumAge                  DepartmentMinimumAge @default(none)
+  defaultRetailMargin         Decimal?             @db.Decimal(8, 4)
+  minimumRingUpAmount         Decimal?             @db.Decimal(12, 2)
+  maximumRingUpAmount         Decimal?             @db.Decimal(12, 2)
+  trackInventory              Boolean              @default(true)
+  allowNegativeInventorySales Boolean              @default(false)
+  allowEbt                    Boolean              @default(false)
+  defaultAllowEbt             Boolean              @default(false)
+  allowManualRingUp           Boolean              @default(false)
+  onPos                       Boolean              @default(true)
+  isActive                    Boolean              @default(true)
+  createdAt                   DateTime             @default(now())
+  updatedAt                   DateTime             @updatedAt
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
+  defaultTaxId String?
+  defaultTax   Tax?    @relation(fields: [defaultTaxId], references: [id])
+
   products Product[]
 
   @@unique([storeId, name])
+  @@unique([storeId, posDepartmentNumber])
   @@index([storeId, isActive])
+  @@index([storeId, onPos, posDepartmentNumber])
+  @@index([defaultTaxId])
 }
 
 model InventoryLog {
@@ -702,7 +734,8 @@ model Tax {
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
-  products Product[]
+  products    Product[]
+  departments Department[]
 
   @@unique([storeId, name])
   @@index([storeId, isActive])

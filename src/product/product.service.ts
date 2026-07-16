@@ -5,6 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  DepartmentMinimumAge,
+  DepartmentType,
   InventoryActionType,
   Prisma,
   ProductSaleType,
@@ -25,21 +27,12 @@ export class ProductService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    const dto = {
-      storeId: this.requiredString(body.storeId, 'storeId'),
-      name: this.requiredString(body.name, 'name'),
-      defaultAllowEbt:
-        this.optionalBoolean(body.defaultAllowEbt, 'defaultAllowEbt', false) ??
-        false,
-    };
-    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
-
-    try {
-      return await this.prisma.department.create({ data: dto });
-    } catch (error) {
-      this.handleSetupNameConflict(error, 'department');
-      throw error;
-    }
+    const { storeId, ...departmentBody } = body;
+    return this.createStoreDepartment(
+      this.requiredString(storeId, 'storeId'),
+      departmentBody,
+      user,
+    );
   }
 
   async listDepartments(storeId: string, user: AuthTokenPayload) {
@@ -61,8 +54,8 @@ export class ProductService {
     const search = this.optionalSearch(query.search, 'search');
     const sort = this.optionalSort(
       query.sort,
-      ['name', 'createdAt', 'updatedAt'],
-      'name',
+      ['posDepartmentNumber', 'name', 'createdAt', 'updatedAt'],
+      'posDepartmentNumber',
       'sort',
     );
     const order = this.optionalSort(
@@ -72,38 +65,47 @@ export class ProductService {
       'order',
     );
     const pagination = this.parsePageLimit(query);
+    const onPos = this.optionalQueryBoolean(query.onPos, 'onPos');
     const where: Prisma.DepartmentWhereInput = {
       storeId,
       ...(active === undefined ? {} : { isActive: active }),
-      ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
+      ...(onPos === undefined ? {} : { onPos }),
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              ...(this.isPositiveIntegerText(search)
+                ? [{ posDepartmentNumber: Number(search) }]
+                : []),
+            ],
+          }
+        : {}),
     };
+    const orderBy =
+      sort === 'posDepartmentNumber'
+        ? [{ posDepartmentNumber: order }, { name: 'asc' as const }]
+        : [{ [sort]: order }, { posDepartmentNumber: 'asc' as const }];
 
     const [departments, total] = await Promise.all([
       this.prisma.department.findMany({
         where,
-        orderBy: { [sort]: order },
+        orderBy,
         skip: pagination.skip,
         take: pagination.limit,
         include: {
           _count: {
             select: { products: true },
           },
+          defaultTax: true,
         },
       }),
       this.prisma.department.count({ where }),
     ]);
 
     return {
-      items: departments.map((department) => ({
-        id: department.id,
-        storeId: department.storeId,
-        name: department.name,
-        defaultAllowEbt: department.defaultAllowEbt,
-        isActive: department.isActive,
-        createdAt: department.createdAt,
-        updatedAt: department.updatedAt,
-        productCount: department._count.products,
-      })),
+      items: departments.map((department) =>
+        this.serializeDepartment(department),
+      ),
       total,
       page: pagination.page,
       limit: pagination.limit,
@@ -118,13 +120,27 @@ export class ProductService {
     await this.access.ensureStoreAccess(storeId, user, 'manage_products');
     const dto = this.parseCreateDepartmentBody(body);
     await this.ensureDepartmentNameAvailable(storeId, dto.name);
+    await this.ensureDepartmentNumberAvailable(
+      storeId,
+      dto.posDepartmentNumber,
+    );
+    await this.ensureActiveTaxInStore(storeId, dto.defaultTaxId);
 
     try {
-      return await this.prisma.department.create({
-        data: { storeId, ...dto },
+      const department = await this.prisma.department.create({
+        data: {
+          storeId,
+          ...dto,
+          defaultAllowEbt: dto.allowEbt,
+        },
+        include: {
+          _count: { select: { products: true } },
+          defaultTax: true,
+        },
       });
+      return this.serializeDepartment(department);
     } catch (error) {
-      this.handleDepartmentNameConflict(error);
+      this.handleDepartmentConflict(error);
       throw error;
     }
   }
@@ -149,14 +165,34 @@ export class ProductService {
         department.id,
       );
     }
+    if (data.posDepartmentNumber !== undefined) {
+      await this.ensureDepartmentNumberAvailable(
+        storeId,
+        data.posDepartmentNumber,
+        department.id,
+      );
+    }
+    if (data.defaultTaxId !== undefined) {
+      await this.ensureActiveTaxInStore(storeId, data.defaultTaxId);
+    }
 
     try {
-      return await this.prisma.department.update({
+      const updated = await this.prisma.department.update({
         where: { id: department.id },
-        data,
+        data: {
+          ...data,
+          ...(data.allowEbt === undefined
+            ? {}
+            : { defaultAllowEbt: data.allowEbt }),
+        },
+        include: {
+          _count: { select: { products: true } },
+          defaultTax: true,
+        },
       });
+      return this.serializeDepartment(updated);
     } catch (error) {
-      this.handleDepartmentNameConflict(error);
+      this.handleDepartmentConflict(error);
       throw error;
     }
   }
@@ -437,8 +473,10 @@ export class ProductService {
       departmentId: dto.departmentId,
       priceGroupId: dto.priceGroupId,
       productCategoryId: dto.productCategoryId,
-      taxId: dto.taxId,
     });
+    const inherited = this.resolveDepartmentProductDefaults(
+      relations.department,
+    );
     const calculated = this.calculateProductFields(dto);
 
     try {
@@ -446,8 +484,9 @@ export class ProductService {
         const product = await tx.product.create({
           data: {
             ...dto,
+            ...inherited,
             ...calculated,
-            allowEbt: dto.allowEbt ?? relations.department.defaultAllowEbt,
+            defaultMargin: dto.defaultMargin ?? inherited.defaultMargin,
           },
           include: this.productInclude,
         });
@@ -499,7 +538,6 @@ export class ProductService {
       departmentId: next.departmentId,
       priceGroupId: next.priceGroupId,
       productCategoryId: next.productCategoryId,
-      taxId: next.taxId,
     };
     const relations = await this.validateRelationsForStore(
       product.storeId,
@@ -511,8 +549,19 @@ export class ProductService {
       ...calculated,
     };
 
-    if (dto.departmentId !== undefined && dto.allowEbt === undefined) {
-      data.allowEbt = relations.department.defaultAllowEbt;
+    if (dto.departmentId !== undefined) {
+      const inherited = this.resolveDepartmentProductDefaults(
+        relations.department,
+      );
+      data.taxId = inherited.taxId;
+      if (dto.allowEbt === undefined) data.allowEbt = inherited.allowEbt;
+      if (dto.trackInventory === undefined)
+        data.trackInventory = inherited.trackInventory;
+      if (dto.allowNegativeInventory === undefined)
+        data.allowNegativeInventory = inherited.allowNegativeInventory;
+      if (dto.minimumAge === undefined) data.minimumAge = inherited.minimumAge;
+      if (dto.defaultMargin === undefined)
+        data.defaultMargin = inherited.defaultMargin;
     }
 
     try {
@@ -920,12 +969,12 @@ export class ProductService {
       departmentId: string;
       priceGroupId?: string | null;
       productCategoryId?: string | null;
-      taxId: string;
     },
   ) {
-    const [department, priceGroup, productCategory, tax] = await Promise.all([
+    const [department, priceGroup, productCategory] = await Promise.all([
       this.prisma.department.findFirst({
         where: { id: ids.departmentId, storeId, isActive: true },
+        include: { defaultTax: true },
       }),
       this.prisma.priceGroup.findFirst({
         where: ids.priceGroupId
@@ -936,9 +985,6 @@ export class ProductService {
         where: ids.productCategoryId
           ? { id: ids.productCategoryId, storeId, isActive: true }
           : { id: '__optional_category_not_selected__' },
-      }),
-      this.prisma.tax.findFirst({
-        where: { id: ids.taxId, storeId, isActive: true },
       }),
     ]);
 
@@ -960,11 +1006,52 @@ export class ProductService {
       );
     }
 
-    if (!tax) {
-      throw new BadRequestException('taxId must belong to the product store');
+    if (!department.defaultTaxId || !department.defaultTax?.isActive) {
+      throw new BadRequestException(
+        'Department must have an active default tax before assigning products',
+      );
     }
 
-    return { department, priceGroup, productCategory, tax };
+    return { department, priceGroup, productCategory };
+  }
+
+  private resolveDepartmentProductDefaults(
+    department: Prisma.DepartmentGetPayload<{ include: { defaultTax: true } }>,
+  ) {
+    if (!department.defaultTaxId) {
+      throw new BadRequestException(
+        'Department must have a default tax before assigning products',
+      );
+    }
+
+    return {
+      taxId: department.defaultTaxId,
+      allowEbt: department.allowEbt,
+      trackInventory: department.trackInventory,
+      allowNegativeInventory: department.allowNegativeInventorySales,
+      minimumAge: this.departmentMinimumAgeToProductMinimumAge(
+        department.minimumAge,
+      ),
+      defaultMargin:
+        department.defaultRetailMargin === null
+          ? null
+          : Number(department.defaultRetailMargin),
+    };
+  }
+
+  private departmentMinimumAgeToProductMinimumAge(
+    minimumAge: DepartmentMinimumAge,
+  ) {
+    switch (minimumAge) {
+      case DepartmentMinimumAge.age_18:
+      case DepartmentMinimumAge.age_18_time_sensitive:
+        return 18;
+      case DepartmentMinimumAge.age_21:
+      case DepartmentMinimumAge.age_21_time_sensitive:
+        return 21;
+      default:
+        return null;
+    }
   }
 
   private calculateProductFields(values: ProductCalculationInput) {
@@ -1098,7 +1185,7 @@ export class ProductService {
       maxInventory: this.optionalInt(body.maxInventory, 'maxInventory'),
       minInventory: this.optionalInt(body.minInventory, 'minInventory'),
       minimumAge: this.optionalInt(body.minimumAge, 'minimumAge'),
-      taxId: this.requiredString(body.taxId, 'taxId'),
+      taxId: this.optionalString(body.taxId, 'taxId') ?? '',
       nacsCode: this.optionalString(body.nacsCode, 'nacsCode'),
       nacsCategory: this.optionalString(body.nacsCategory, 'nacsCategory'),
       nacsSubCategory: this.optionalString(
@@ -1202,7 +1289,7 @@ export class ProductService {
     if (body.minimumAge !== undefined)
       updates.minimumAge = this.optionalInt(body.minimumAge, 'minimumAge');
     if (body.taxId !== undefined)
-      updates.taxId = this.requiredString(body.taxId, 'taxId');
+      throw new BadRequestException('taxId is inherited from department');
     if (body.nacsCode !== undefined)
       updates.nacsCode = this.optionalString(body.nacsCode, 'nacsCode');
     if (body.nacsCategory !== undefined)
@@ -1268,19 +1355,64 @@ export class ProductService {
   }
 
   private parseCreateDepartmentBody(body: Record<string, unknown>) {
-    this.ensureAllowedFields(body, ['name', 'defaultAllowEbt', 'isActive']);
+    this.ensureAllowedFields(body, this.departmentFields);
+    const minimumRingUpAmount = this.optionalCurrency(
+      body.minimumRingUpAmount,
+      'minimumRingUpAmount',
+    );
+    const maximumRingUpAmount = this.optionalCurrency(
+      body.maximumRingUpAmount,
+      'maximumRingUpAmount',
+    );
+    this.validateRingUpRange(minimumRingUpAmount, maximumRingUpAmount);
+    const allowEbt =
+      body.allowEbt !== undefined
+        ? this.requiredBoolean(body.allowEbt, 'allowEbt')
+        : (this.optionalBoolean(
+            body.defaultAllowEbt,
+            'defaultAllowEbt',
+            false,
+          ) ?? false);
 
     return {
       name: this.normalizeDepartmentName(body.name),
-      defaultAllowEbt:
-        this.optionalBoolean(body.defaultAllowEbt, 'defaultAllowEbt', false) ??
-        false,
+      posDepartmentNumber: this.requiredDepartmentNumber(
+        body.posDepartmentNumber,
+      ),
+      type: this.requiredEnum(body.type, 'type', DepartmentType),
+      defaultTaxId: this.requiredString(body.defaultTaxId, 'defaultTaxId'),
+      minimumAge:
+        this.optionalDepartmentMinimumAge(body.minimumAge) ??
+        DepartmentMinimumAge.none,
+      defaultRetailMargin: this.optionalPercentage(
+        body.defaultRetailMargin,
+        'defaultRetailMargin',
+      ),
+      minimumRingUpAmount,
+      maximumRingUpAmount,
+      trackInventory:
+        this.optionalBoolean(body.trackInventory, 'trackInventory', true) ??
+        true,
+      allowNegativeInventorySales:
+        this.optionalBoolean(
+          body.allowNegativeInventorySales,
+          'allowNegativeInventorySales',
+          false,
+        ) ?? false,
+      allowEbt,
+      allowManualRingUp:
+        this.optionalBoolean(
+          body.allowManualRingUp,
+          'allowManualRingUp',
+          false,
+        ) ?? false,
+      onPos: this.optionalBoolean(body.onPos, 'onPos', true) ?? true,
       isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
     };
   }
 
   private parseUpdateDepartmentBody(body: Record<string, unknown>) {
-    this.ensureAllowedFields(body, ['name', 'defaultAllowEbt', 'isActive']);
+    this.ensureAllowedFields(body, this.departmentFields);
 
     const data: DepartmentUpdateData = {};
 
@@ -1288,11 +1420,92 @@ export class ProductService {
       data.name = this.normalizeDepartmentName(body.name);
     }
 
-    if (body.defaultAllowEbt !== undefined) {
-      data.defaultAllowEbt = this.requiredBoolean(
-        body.defaultAllowEbt,
-        'defaultAllowEbt',
+    if (body.posDepartmentNumber !== undefined) {
+      data.posDepartmentNumber = this.requiredDepartmentNumber(
+        body.posDepartmentNumber,
       );
+    }
+
+    if (body.type !== undefined) {
+      data.type = this.requiredEnum(body.type, 'type', DepartmentType);
+    }
+
+    if (body.defaultTaxId !== undefined) {
+      data.defaultTaxId = this.requiredString(
+        body.defaultTaxId,
+        'defaultTaxId',
+      );
+    }
+
+    if (body.minimumAge !== undefined) {
+      data.minimumAge = this.requiredEnum(
+        body.minimumAge,
+        'minimumAge',
+        DepartmentMinimumAge,
+      );
+    }
+
+    if (body.defaultRetailMargin !== undefined) {
+      data.defaultRetailMargin = this.optionalPercentage(
+        body.defaultRetailMargin,
+        'defaultRetailMargin',
+      );
+    }
+
+    if (body.minimumRingUpAmount !== undefined) {
+      data.minimumRingUpAmount = this.optionalCurrency(
+        body.minimumRingUpAmount,
+        'minimumRingUpAmount',
+      );
+    }
+
+    if (body.maximumRingUpAmount !== undefined) {
+      data.maximumRingUpAmount = this.optionalCurrency(
+        body.maximumRingUpAmount,
+        'maximumRingUpAmount',
+      );
+    }
+
+    if (
+      data.minimumRingUpAmount !== undefined ||
+      data.maximumRingUpAmount !== undefined
+    ) {
+      this.validateRingUpRange(
+        data.minimumRingUpAmount,
+        data.maximumRingUpAmount,
+      );
+    }
+
+    if (body.trackInventory !== undefined) {
+      data.trackInventory = this.requiredBoolean(
+        body.trackInventory,
+        'trackInventory',
+      );
+    }
+
+    if (body.allowNegativeInventorySales !== undefined) {
+      data.allowNegativeInventorySales = this.requiredBoolean(
+        body.allowNegativeInventorySales,
+        'allowNegativeInventorySales',
+      );
+    }
+
+    if (body.allowEbt !== undefined || body.defaultAllowEbt !== undefined) {
+      data.allowEbt =
+        body.allowEbt !== undefined
+          ? this.requiredBoolean(body.allowEbt, 'allowEbt')
+          : this.requiredBoolean(body.defaultAllowEbt, 'defaultAllowEbt');
+    }
+
+    if (body.allowManualRingUp !== undefined) {
+      data.allowManualRingUp = this.requiredBoolean(
+        body.allowManualRingUp,
+        'allowManualRingUp',
+      );
+    }
+
+    if (body.onPos !== undefined) {
+      data.onPos = this.requiredBoolean(body.onPos, 'onPos');
     }
 
     if (body.isActive !== undefined) {
@@ -1359,6 +1572,97 @@ export class ProductService {
     return normalized;
   }
 
+  private requiredDepartmentNumber(value: unknown) {
+    const number = this.requiredPositiveInt(value, 'posDepartmentNumber');
+
+    if (number > 9999) {
+      throw new BadRequestException(
+        'posDepartmentNumber must be 9999 or lower',
+      );
+    }
+
+    return number;
+  }
+
+  private optionalDepartmentMinimumAge(value: unknown) {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    return this.requiredEnum(value, 'minimumAge', DepartmentMinimumAge);
+  }
+
+  private optionalPercentage(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    const parsed = this.requiredDecimal(value, field, 4);
+
+    if (parsed < 0 || parsed > 100) {
+      throw new BadRequestException(`${field} must be between 0 and 100`);
+    }
+
+    return new Prisma.Decimal(parsed);
+  }
+
+  private optionalCurrency(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    const parsed = this.requiredDecimal(value, field, 2);
+
+    if (parsed < 0) {
+      throw new BadRequestException(`${field} must be zero or greater`);
+    }
+
+    return new Prisma.Decimal(parsed);
+  }
+
+  private requiredDecimal(value: unknown, field: string, maxScale: number) {
+    if (typeof value !== 'number' && typeof value !== 'string') {
+      throw new BadRequestException(`${field} must be a number`);
+    }
+
+    const raw = String(value).trim();
+
+    if (!/^\d+(\.\d+)?$/.test(raw)) {
+      throw new BadRequestException(`${field} must be a valid number`);
+    }
+
+    const decimalPart = raw.split('.')[1] ?? '';
+
+    if (decimalPart.length > maxScale) {
+      throw new BadRequestException(
+        `${field} must have ${maxScale} or fewer decimal places`,
+      );
+    }
+
+    const parsed = Number(raw);
+
+    if (!Number.isFinite(parsed)) {
+      throw new BadRequestException(`${field} must be a finite number`);
+    }
+
+    return parsed;
+  }
+
+  private validateRingUpRange(
+    minimum: Prisma.Decimal | null | undefined,
+    maximum: Prisma.Decimal | null | undefined,
+  ) {
+    if (minimum && maximum && minimum.greaterThan(maximum)) {
+      throw new BadRequestException(
+        'minimumRingUpAmount cannot exceed maximumRingUpAmount',
+      );
+    }
+  }
+
+  private isPositiveIntegerText(value: string) {
+    return /^[1-9]\d*$/.test(value);
+  }
+
   private async ensureDepartmentNameAvailable(
     storeId: string,
     name: string,
@@ -1376,6 +1680,40 @@ export class ProductService {
     if (existing) {
       throw new ConflictException(
         'A department with this name already exists in this store.',
+      );
+    }
+  }
+
+  private async ensureDepartmentNumberAvailable(
+    storeId: string,
+    posDepartmentNumber: number,
+    currentDepartmentId?: string,
+  ) {
+    const existing = await this.prisma.department.findFirst({
+      where: {
+        storeId,
+        posDepartmentNumber,
+        ...(currentDepartmentId ? { id: { not: currentDepartmentId } } : {}),
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      throw new ConflictException(
+        'A department with this POS department number already exists in this store.',
+      );
+    }
+  }
+
+  private async ensureActiveTaxInStore(storeId: string, taxId: string) {
+    const tax = await this.prisma.tax.findFirst({
+      where: { id: taxId, storeId, isActive: true },
+      select: { id: true },
+    });
+
+    if (!tax) {
+      throw new BadRequestException(
+        'defaultTaxId must belong to an active tax for this store',
       );
     }
   }
@@ -1673,6 +2011,95 @@ export class ProductService {
     }
   }
 
+  private handleDepartmentConflict(error: unknown) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      const target = Array.isArray(error.meta?.target)
+        ? error.meta.target.join(',')
+        : typeof error.meta?.target === 'string' ||
+            typeof error.meta?.target === 'number'
+          ? String(error.meta.target)
+          : '';
+
+      if (target.includes('posDepartmentNumber')) {
+        throw new ConflictException(
+          'A department with this POS department number already exists in this store.',
+        );
+      }
+
+      throw new ConflictException(
+        'A department with this name already exists in this store.',
+      );
+    }
+  }
+
+  private serializeDepartment(
+    department: Prisma.DepartmentGetPayload<{
+      include: { _count: { select: { products: true } }; defaultTax: true };
+    }>,
+  ) {
+    return {
+      id: department.id,
+      storeId: department.storeId,
+      name: department.name,
+      posDepartmentNumber: department.posDepartmentNumber,
+      type: department.type,
+      defaultTaxId: department.defaultTaxId,
+      defaultTax: department.defaultTax
+        ? {
+            id: department.defaultTax.id,
+            storeId: department.defaultTax.storeId,
+            name: department.defaultTax.name,
+            rate: department.defaultTax.rate,
+            isActive: department.defaultTax.isActive,
+          }
+        : null,
+      minimumAge: department.minimumAge,
+      defaultRetailMargin:
+        department.defaultRetailMargin === null
+          ? null
+          : Number(department.defaultRetailMargin),
+      minimumRingUpAmount:
+        department.minimumRingUpAmount === null
+          ? null
+          : Number(department.minimumRingUpAmount),
+      maximumRingUpAmount:
+        department.maximumRingUpAmount === null
+          ? null
+          : Number(department.maximumRingUpAmount),
+      trackInventory: department.trackInventory,
+      allowNegativeInventorySales: department.allowNegativeInventorySales,
+      allowEbt: department.allowEbt,
+      defaultAllowEbt: department.allowEbt,
+      allowManualRingUp: department.allowManualRingUp,
+      onPos: department.onPos,
+      isActive: department.isActive,
+      createdAt: department.createdAt,
+      updatedAt: department.updatedAt,
+      productCount: department._count.products,
+    };
+  }
+
+  private readonly departmentFields = [
+    'name',
+    'posDepartmentNumber',
+    'type',
+    'defaultTaxId',
+    'minimumAge',
+    'defaultRetailMargin',
+    'minimumRingUpAmount',
+    'maximumRingUpAmount',
+    'trackInventory',
+    'allowNegativeInventorySales',
+    'allowEbt',
+    'defaultAllowEbt',
+    'allowManualRingUp',
+    'onPos',
+    'isActive',
+  ];
+
   private readonly productInclude = {
     department: true,
     priceGroup: true,
@@ -1721,7 +2148,18 @@ type ProductUpdateDto = Partial<Omit<ProductCreateDto, 'storeId'>>;
 
 type DepartmentUpdateData = {
   name?: string;
-  defaultAllowEbt?: boolean;
+  posDepartmentNumber?: number;
+  type?: DepartmentType;
+  defaultTaxId?: string;
+  minimumAge?: DepartmentMinimumAge;
+  defaultRetailMargin?: Prisma.Decimal | null;
+  minimumRingUpAmount?: Prisma.Decimal | null;
+  maximumRingUpAmount?: Prisma.Decimal | null;
+  trackInventory?: boolean;
+  allowNegativeInventorySales?: boolean;
+  allowEbt?: boolean;
+  allowManualRingUp?: boolean;
+  onPos?: boolean;
   isActive?: boolean;
 };
 

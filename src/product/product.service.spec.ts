@@ -3,7 +3,14 @@ import {
   ConflictException,
   ForbiddenException,
 } from '@nestjs/common';
-import { Prisma, ProductSaleType, StaffRole, TaxStyle } from '@prisma/client';
+import {
+  DepartmentMinimumAge,
+  DepartmentType,
+  Prisma,
+  ProductSaleType,
+  StaffRole,
+  TaxStyle,
+} from '@prisma/client';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
 import { ProductService } from './product.service';
@@ -92,6 +99,10 @@ describe('ProductService item editor APIs', () => {
     product: { findFirst: jest.Mock; create?: jest.Mock };
     $transaction: jest.Mock;
   };
+  let txProductCreate: jest.Mock<
+    Promise<Record<string, unknown>>,
+    [{ data: Record<string, unknown> }]
+  >;
   let access: { ensureStoreAccess: jest.Mock };
 
   const user = {
@@ -102,11 +113,17 @@ describe('ProductService item editor APIs', () => {
   };
 
   beforeEach(() => {
+    txProductCreate = jest
+      .fn<
+        Promise<Record<string, unknown>>,
+        [{ data: Record<string, unknown> }]
+      >()
+      .mockResolvedValue(productFixture());
     prisma = {
       department: {
         findFirst: jest
           .fn()
-          .mockResolvedValue({ id: 'department-1', defaultAllowEbt: true }),
+          .mockResolvedValue(departmentFixture({ allowEbt: true })),
       },
       priceGroup: { findFirst: jest.fn() },
       productCategory: { findFirst: jest.fn() },
@@ -116,7 +133,7 @@ describe('ProductService item editor APIs', () => {
         async (callback: (tx: unknown) => Promise<unknown>) =>
           callback({
             product: {
-              create: jest.fn().mockResolvedValue(productFixture()),
+              create: txProductCreate,
             },
             inventoryLog: { create: jest.fn() },
           }),
@@ -148,6 +165,73 @@ describe('ProductService item editor APIs', () => {
     expect(prisma.productCategory.findFirst).toHaveBeenCalledWith({
       where: { id: '__optional_category_not_selected__' },
     });
+  });
+
+  it('uses department tax and defaults when creating a product', async () => {
+    prisma.department.findFirst.mockResolvedValue(
+      departmentFixture({
+        defaultTaxId: 'department-tax',
+        defaultTax: {
+          id: 'department-tax',
+          storeId: 'store-1',
+          name: 'Department Tax',
+          rate: new Prisma.Decimal('0.0625'),
+          isActive: true,
+        },
+        allowEbt: true,
+        trackInventory: false,
+        allowNegativeInventorySales: true,
+        minimumAge: DepartmentMinimumAge.age_21,
+        defaultRetailMargin: new Prisma.Decimal('42.5'),
+      }),
+    );
+
+    await service.create(
+      createBody({
+        taxId: 'frontend-tax',
+        allowEbt: false,
+        trackInventory: true,
+        allowNegativeInventory: false,
+        minimumAge: null,
+      }),
+      user,
+    );
+
+    const createArg = txProductCreate.mock.calls[0]?.[0] as
+      | { data: Record<string, unknown> }
+      | undefined;
+
+    expect(createArg?.data).toEqual(
+      expect.objectContaining({
+        taxId: 'department-tax',
+        allowEbt: true,
+        trackInventory: false,
+        allowNegativeInventory: true,
+        minimumAge: 21,
+        defaultMargin: 42.5,
+      }),
+    );
+  });
+
+  it('rejects product creation when department has no active default tax', async () => {
+    prisma.department.findFirst.mockResolvedValue(
+      departmentFixture({
+        defaultTaxId: 'inactive-tax',
+        defaultTax: {
+          id: 'inactive-tax',
+          storeId: 'store-1',
+          name: 'Inactive Tax',
+          rate: new Prisma.Decimal('0.0625'),
+          isActive: false,
+        },
+      }),
+    );
+
+    await expect(service.create(createBody(), user)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+
+    expect(txProductCreate).not.toHaveBeenCalled();
   });
 
   it('rejects invalid UPC and EAN check digits', async () => {
@@ -205,6 +289,7 @@ describe('ProductService department management APIs', () => {
       create: jest.Mock;
       update: jest.Mock;
     };
+    tax: { findFirst: jest.Mock };
   };
   let access: { ensureStoreAccess: jest.Mock };
 
@@ -224,6 +309,7 @@ describe('ProductService department management APIs', () => {
         create: jest.fn(),
         update: jest.fn(),
       },
+      tax: { findFirst: jest.fn().mockResolvedValue({ id: 'tax-1' }) },
     };
     access = {
       ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
@@ -245,7 +331,10 @@ describe('ProductService department management APIs', () => {
         'store-1',
         {
           name: '  Cold   Drinks  ',
-          defaultAllowEbt: true,
+          posDepartmentNumber: 10,
+          type: DepartmentType.merchandise,
+          defaultTaxId: 'tax-1',
+          allowEbt: true,
           isActive: true,
         },
         user,
@@ -261,8 +350,24 @@ describe('ProductService department management APIs', () => {
       data: {
         storeId: 'store-1',
         name: 'Cold Drinks',
+        posDepartmentNumber: 10,
+        type: DepartmentType.merchandise,
+        defaultTaxId: 'tax-1',
+        minimumAge: DepartmentMinimumAge.none,
+        defaultRetailMargin: null,
+        minimumRingUpAmount: null,
+        maximumRingUpAmount: null,
+        trackInventory: true,
+        allowNegativeInventorySales: false,
+        allowEbt: true,
         defaultAllowEbt: true,
+        allowManualRingUp: false,
+        onPos: true,
         isActive: true,
+      },
+      include: {
+        _count: { select: { products: true } },
+        defaultTax: true,
       },
     });
   });
@@ -271,7 +376,14 @@ describe('ProductService department management APIs', () => {
     await expect(
       service.createStoreDepartment(
         'store-1',
-        { name: '   ', defaultAllowEbt: false, isActive: true },
+        {
+          name: '   ',
+          posDepartmentNumber: 10,
+          type: DepartmentType.merchandise,
+          defaultTaxId: 'tax-1',
+          allowEbt: false,
+          isActive: true,
+        },
         user,
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
@@ -287,7 +399,14 @@ describe('ProductService department management APIs', () => {
     await expect(
       service.createStoreDepartment(
         'store-1',
-        { name: ' beverages ', defaultAllowEbt: false, isActive: true },
+        {
+          name: ' beverages ',
+          posDepartmentNumber: 10,
+          type: DepartmentType.merchandise,
+          defaultTaxId: 'tax-1',
+          allowEbt: false,
+          isActive: true,
+        },
         user,
       ),
     ).rejects.toBeInstanceOf(ConflictException);
@@ -300,14 +419,14 @@ describe('ProductService department management APIs', () => {
       .mockResolvedValueOnce(departmentFixture())
       .mockResolvedValueOnce(null);
     prisma.department.update.mockResolvedValue(
-      departmentFixture({ defaultAllowEbt: true }),
+      departmentFixture({ allowEbt: true, defaultAllowEbt: true }),
     );
 
     await expect(
       service.updateStoreDepartment(
         'store-1',
         'department-1',
-        { name: 'Beverages', defaultAllowEbt: true },
+        { name: 'Beverages', allowEbt: true },
         user,
       ),
     ).resolves.toEqual(expect.objectContaining({ defaultAllowEbt: true }));
@@ -353,6 +472,10 @@ describe('ProductService department management APIs', () => {
     expect(prisma.department.update).toHaveBeenCalledWith({
       where: { id: 'department-1' },
       data: { isActive: false },
+      include: {
+        _count: { select: { products: true } },
+        defaultTax: true,
+      },
     });
   });
 
@@ -417,9 +540,9 @@ describe('ProductService department management APIs', () => {
       expect.objectContaining({
         where: {
           storeId: 'store-1',
-          name: { contains: 'cold', mode: 'insensitive' },
+          OR: [{ name: { contains: 'cold', mode: 'insensitive' } }],
         },
-        orderBy: { name: 'asc' },
+        orderBy: [{ name: 'asc' }, { posDepartmentNumber: 'asc' }],
         take: 100,
       }),
     );
@@ -459,8 +582,28 @@ function departmentFixture(overrides: Record<string, unknown> = {}) {
     id: 'department-1',
     storeId: 'store-1',
     name: 'Beverages',
+    posDepartmentNumber: 10,
+    type: DepartmentType.merchandise,
+    defaultTaxId: 'tax-1',
+    defaultTax: {
+      id: 'tax-1',
+      storeId: 'store-1',
+      name: 'Sales Tax',
+      rate: new Prisma.Decimal('0.0825'),
+      isActive: true,
+    },
+    minimumAge: DepartmentMinimumAge.none,
+    defaultRetailMargin: null,
+    minimumRingUpAmount: null,
+    maximumRingUpAmount: null,
+    trackInventory: true,
+    allowNegativeInventorySales: false,
+    allowEbt: false,
     defaultAllowEbt: false,
+    allowManualRingUp: false,
+    onPos: true,
     isActive: true,
+    _count: { products: 0 },
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-02T00:00:00.000Z'),
     ...overrides,
