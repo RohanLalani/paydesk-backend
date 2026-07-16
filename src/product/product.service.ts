@@ -435,6 +435,7 @@ export class ProductService {
 
         return {
           id: product.id,
+          productNumber: product.productNumber,
           barcode: product.barcode,
           name: product.name,
           departmentName: product.department?.name ?? null,
@@ -493,29 +494,265 @@ export class ProductService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    const dto = {
-      storeId: this.requiredString(body.storeId, 'storeId'),
-      name: this.requiredString(body.name, 'name'),
-      brand: this.optionalString(body.brand, 'brand'),
-      description: this.optionalString(body.description, 'description'),
+    const storeId = this.requiredString(body.storeId, 'storeId');
+    return this.createStoreCategory(storeId, body, user);
+  }
+
+  async listProductCategories(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+
+    const categories = await this.prisma.productCategory.findMany({
+      where: {
+        storeId,
+        isActive: true,
+        department: { isActive: true },
+      },
+      orderBy: [
+        { department: { posDepartmentNumber: 'asc' } },
+        { name: 'asc' },
+      ],
+      include: {
+        department: true,
+        _count: { select: { products: true } },
+      },
+    });
+
+    return categories.map((category) =>
+      this.serializeProductCategory(category),
+    );
+  }
+
+  async listStoreCategories(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const active = this.optionalQueryBoolean(query.active, 'active');
+    const search = this.optionalSearch(query.search, 'search');
+    const departmentId = this.optionalString(
+      query.departmentId,
+      'departmentId',
+    );
+    const pagination = this.parsePageLimit(query);
+    const where: Prisma.ProductCategoryWhereInput = {
+      storeId,
+      ...(active === undefined ? {} : { isActive: active }),
+      ...(departmentId ? { departmentId } : {}),
+      ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
     };
-    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
+
+    const [categories, total] = await Promise.all([
+      this.prisma.productCategory.findMany({
+        where,
+        orderBy: [
+          { department: { posDepartmentNumber: 'asc' } },
+          { name: 'asc' },
+        ],
+        skip: pagination.skip,
+        take: pagination.limit,
+        include: {
+          department: true,
+          _count: { select: { products: true } },
+        },
+      }),
+      this.prisma.productCategory.count({ where }),
+    ]);
+
+    return {
+      items: categories.map((category) =>
+        this.serializeProductCategory(category),
+      ),
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+    };
+  }
+
+  async listPosCategories(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const categories = await this.prisma.productCategory.findMany({
+      where: {
+        storeId,
+        isActive: true,
+        departmentId: { not: null },
+        department: { isActive: true, onPos: true },
+      },
+      orderBy: [
+        { department: { posDepartmentNumber: 'asc' } },
+        { name: 'asc' },
+      ],
+      include: {
+        department: true,
+        _count: { select: { products: true } },
+      },
+    });
+
+    return categories.map((category) => ({
+      categoryId: category.id,
+      name: category.name,
+      departmentId: category.departmentId,
+      departmentName: category.department?.name ?? null,
+      posDepartmentNumber: category.department?.posDepartmentNumber ?? null,
+      productCount: category._count.products,
+    }));
+  }
+
+  async createStoreCategory(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const dto = this.parseCreateCategoryBody(body);
+    await this.ensureActiveDepartmentInStore(storeId, dto.departmentId);
+    await this.ensureCategoryNameAvailable(storeId, dto.departmentId, dto.name);
 
     try {
-      return await this.prisma.productCategory.create({ data: dto });
+      const category = await this.prisma.productCategory.create({
+        data: { ...dto, storeId },
+        include: {
+          department: true,
+          _count: { select: { products: true } },
+        },
+      });
+
+      return this.serializeProductCategory(category);
     } catch (error) {
       this.handleSetupNameConflict(error, 'product category');
       throw error;
     }
   }
 
-  async listProductCategories(storeId: string, user: AuthTokenPayload) {
+  async getStoreCategory(
+    storeId: string,
+    categoryId: string,
+    user: AuthTokenPayload,
+  ) {
     await this.access.ensureStoreAccess(storeId, user, 'manage_products');
-
-    return this.prisma.productCategory.findMany({
-      where: { storeId, isActive: true },
-      orderBy: { name: 'asc' },
+    const category = await this.prisma.productCategory.findFirst({
+      where: { id: categoryId, storeId },
+      include: {
+        department: true,
+        _count: { select: { products: true } },
+      },
     });
+
+    if (!category) {
+      throw new NotFoundException('Product category not found');
+    }
+
+    return this.serializeProductCategory(category);
+  }
+
+  async updateStoreCategory(
+    storeId: string,
+    categoryId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const category = await this.findProductCategoryInStoreOrThrow(
+      categoryId,
+      storeId,
+    );
+    const data = this.parseUpdateCategoryBody(body);
+    const nextDepartmentId = data.departmentId ?? category.departmentId;
+
+    if (data.departmentId !== undefined) {
+      await this.ensureActiveDepartmentInStore(storeId, data.departmentId);
+      const mismatchedProductCount = await this.prisma.product.count({
+        where: {
+          storeId,
+          productCategoryId: categoryId,
+          departmentId: { not: data.departmentId },
+        },
+      });
+
+      if (mismatchedProductCount > 0) {
+        throw new BadRequestException(
+          'Move products to the new department before changing this category department.',
+        );
+      }
+    }
+
+    if (data.name !== undefined && nextDepartmentId) {
+      await this.ensureCategoryNameAvailable(
+        storeId,
+        nextDepartmentId,
+        data.name,
+        categoryId,
+      );
+    }
+
+    try {
+      const updated = await this.prisma.productCategory.update({
+        where: { id: categoryId },
+        data,
+        include: {
+          department: true,
+          _count: { select: { products: true } },
+        },
+      });
+
+      return this.serializeProductCategory(updated);
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'product category');
+      throw error;
+    }
+  }
+
+  async listStoreCategoryProducts(
+    storeId: string,
+    categoryId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    await this.findProductCategoryInStoreOrThrow(categoryId, storeId);
+    const search = this.optionalSearch(query.search, 'search');
+    const pagination = this.parsePageLimit(query);
+    const productNumber =
+      search && this.isPositiveIntegerText(search) ? Number(search) : undefined;
+    const where: Prisma.ProductWhereInput = {
+      storeId,
+      productCategoryId: categoryId,
+      ...(search
+        ? {
+            OR: [
+              { barcode: { contains: search, mode: 'insensitive' } },
+              { name: { contains: search, mode: 'insensitive' } },
+              ...(productNumber ? [{ productNumber }] : []),
+            ],
+          }
+        : {}),
+    };
+
+    const [products, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        orderBy: [{ productNumber: 'asc' }, { name: 'asc' }],
+        skip: pagination.skip,
+        take: pagination.limit,
+        include: { department: true },
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+
+    return {
+      items: products.map((product) => ({
+        id: product.id,
+        productNumber: product.productNumber,
+        barcode: product.barcode,
+        name: product.name,
+        departmentName: product.department?.name ?? null,
+        unitRetail: product.unitRetail,
+        isActive: product.isActive,
+      })),
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+    };
   }
 
   async updateProductCategory(
@@ -524,31 +761,7 @@ export class ProductService {
     user: AuthTokenPayload,
   ) {
     const productCategory = await this.findProductCategoryOrThrow(id);
-    await this.access.ensureStoreAccess(
-      productCategory.storeId,
-      user,
-      'manage_products',
-    );
-    const data: Prisma.ProductCategoryUpdateInput = {};
-
-    if (body.name !== undefined) {
-      data.name = this.requiredString(body.name, 'name');
-    }
-
-    if (body.brand !== undefined) {
-      data.brand = this.optionalString(body.brand, 'brand');
-    }
-
-    if (body.description !== undefined) {
-      data.description = this.optionalString(body.description, 'description');
-    }
-
-    try {
-      return await this.prisma.productCategory.update({ where: { id }, data });
-    } catch (error) {
-      this.handleSetupNameConflict(error, 'product category');
-      throw error;
-    }
+    return this.updateStoreCategory(productCategory.storeId, id, body, user);
   }
 
   async deleteProductCategory(id: string, user: AuthTokenPayload) {
@@ -648,9 +861,16 @@ export class ProductService {
 
     try {
       const product = await this.prisma.$transaction(async (tx) => {
+        const updatedStore = await tx.store.update({
+          where: { id: dto.storeId },
+          data: { nextProductNumber: { increment: 1 } },
+          select: { nextProductNumber: true },
+        });
+        const productNumber = updatedStore.nextProductNumber - 1;
         const product = await tx.product.create({
           data: {
             ...dto,
+            productNumber,
             ...inherited,
             ...calculated,
             defaultMargin: dto.defaultMargin ?? inherited.defaultMargin,
@@ -827,6 +1047,42 @@ export class ProductService {
         barcode: this.validateBarcode(barcode),
         isActive: true,
       },
+      include: this.productInclude,
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return product;
+  }
+
+  async getNextProductNumber(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const store = await this.prisma.store.findFirst({
+      where: { id: storeId },
+      select: { nextProductNumber: true },
+    });
+
+    if (!store) {
+      throw new NotFoundException('Store not found');
+    }
+
+    return { nextProductNumber: store.nextProductNumber };
+  }
+
+  async findByProductNumber(
+    storeId: string,
+    productNumberValue: string,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const productNumber = this.requiredPositiveInt(
+      productNumberValue,
+      'productNumber',
+    );
+    const product = await this.prisma.product.findFirst({
+      where: { storeId, productNumber, isActive: true },
       include: this.productInclude,
     });
 
@@ -1120,6 +1376,18 @@ export class ProductService {
     return productCategory;
   }
 
+  private async findProductCategoryInStoreOrThrow(id: string, storeId: string) {
+    const productCategory = await this.prisma.productCategory.findFirst({
+      where: { id, storeId },
+    });
+
+    if (!productCategory) {
+      throw new NotFoundException('Product category not found');
+    }
+
+    return productCategory;
+  }
+
   private async findTaxOrThrow(id: string) {
     const tax = await this.prisma.tax.findUnique({
       where: { id },
@@ -1179,6 +1447,7 @@ export class ProductService {
         where: ids.productCategoryId
           ? { id: ids.productCategoryId, storeId, isActive: true }
           : { id: '__optional_category_not_selected__' },
+        include: { department: true },
       }),
     ]);
 
@@ -1197,6 +1466,12 @@ export class ProductService {
     if (ids.productCategoryId && !productCategory) {
       throw new BadRequestException(
         'productCategoryId must belong to the product store',
+      );
+    }
+
+    if (productCategory && productCategory.departmentId !== ids.departmentId) {
+      throw new BadRequestException(
+        'The selected category does not belong to the selected department.',
       );
     }
 
@@ -1351,6 +1626,10 @@ export class ProductService {
   }
 
   private parseCreateBody(body: Record<string, unknown>): ProductCreateDto {
+    if (body.productNumber !== undefined) {
+      throw new BadRequestException('productNumber is assigned automatically');
+    }
+
     return {
       storeId: this.requiredString(body.storeId, 'storeId'),
       barcode: this.validateBarcode(body.barcode),
@@ -1407,6 +1686,10 @@ export class ProductService {
 
   private parseUpdateBody(body: Record<string, unknown>): ProductUpdateDto {
     const updates: ProductUpdateDto = {};
+
+    if (body.productNumber !== undefined) {
+      throw new BadRequestException('productNumber cannot be changed');
+    }
 
     if (body.barcode !== undefined)
       updates.barcode = this.validateBarcode(body.barcode);
@@ -1716,6 +1999,103 @@ export class ProductService {
     }
 
     return data;
+  }
+
+  private parseCreateCategoryBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, this.categoryFields);
+
+    return {
+      name: this.normalizeCategoryName(body.name),
+      departmentId: this.requiredString(body.departmentId, 'departmentId'),
+      brand: this.optionalLimitedString(body.brand, 'brand', 100),
+      description: this.optionalLimitedString(
+        body.description,
+        'description',
+        240,
+      ),
+      isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
+    };
+  }
+
+  private parseUpdateCategoryBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, this.categoryFields);
+    const data: CategoryUpdateData = {};
+
+    if (body.name !== undefined) {
+      data.name = this.normalizeCategoryName(body.name);
+    }
+
+    if (body.departmentId !== undefined) {
+      data.departmentId = this.requiredString(
+        body.departmentId,
+        'departmentId',
+      );
+    }
+
+    if (body.brand !== undefined) {
+      data.brand = this.optionalLimitedString(body.brand, 'brand', 100);
+    }
+
+    if (body.description !== undefined) {
+      data.description = this.optionalLimitedString(
+        body.description,
+        'description',
+        240,
+      );
+    }
+
+    if (body.isActive !== undefined) {
+      data.isActive = this.requiredBoolean(body.isActive, 'isActive');
+    }
+
+    if (!Object.keys(data).length) {
+      throw new BadRequestException('At least one category field is required');
+    }
+
+    return data;
+  }
+
+  private normalizeCategoryName(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('name is required');
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      throw new BadRequestException('name is required');
+    }
+
+    if (normalized.length > 100) {
+      throw new BadRequestException('name must be 100 characters or fewer');
+    }
+
+    if (
+      [...normalized].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      throw new BadRequestException('name contains unsupported characters');
+    }
+
+    return normalized;
+  }
+
+  private optionalLimitedString(
+    value: unknown,
+    field: string,
+    maxLength: number,
+  ) {
+    const parsed = this.optionalString(value, field);
+
+    if (parsed !== null && parsed.length > maxLength) {
+      throw new BadRequestException(
+        `${field} must be ${maxLength} characters or fewer`,
+      );
+    }
+
+    return parsed;
   }
 
   private parseCreatePriceGroupBody(body: Record<string, unknown>) {
@@ -2091,6 +2471,50 @@ export class ProductService {
     if (!tax) {
       throw new BadRequestException(
         'defaultTaxId must belong to an active tax for this store',
+      );
+    }
+  }
+
+  private async ensureActiveDepartmentInStore(
+    storeId: string,
+    departmentId: string,
+  ) {
+    const department = await this.prisma.department.findFirst({
+      where: { id: departmentId, storeId, isActive: true },
+      select: { id: true },
+    });
+
+    if (!department) {
+      throw new BadRequestException(
+        'departmentId must belong to an active department for this store',
+      );
+    }
+  }
+
+  private async ensureCategoryNameAvailable(
+    storeId: string,
+    departmentId: string,
+    name: string,
+    currentCategoryId?: string,
+  ) {
+    const normalized = name.toLocaleLowerCase();
+    const categories = await this.prisma.productCategory.findMany({
+      where: {
+        storeId,
+        departmentId,
+        ...(currentCategoryId ? { id: { not: currentCategoryId } } : {}),
+      },
+      select: { name: true },
+    });
+    const duplicate = categories.some(
+      (category) =>
+        category.name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() ===
+        normalized,
+    );
+
+    if (duplicate) {
+      throw new ConflictException(
+        'A category with this name already exists in this department.',
       );
     }
   }
@@ -2479,6 +2903,27 @@ export class ProductService {
     };
   }
 
+  private serializeProductCategory(
+    category: Prisma.ProductCategoryGetPayload<{
+      include: { department: true; _count: { select: { products: true } } };
+    }>,
+  ) {
+    return {
+      id: category.id,
+      storeId: category.storeId,
+      name: category.name,
+      brand: category.brand,
+      description: category.description,
+      departmentId: category.departmentId,
+      departmentName: category.department?.name ?? null,
+      posDepartmentNumber: category.department?.posDepartmentNumber ?? null,
+      isActive: category.isActive,
+      createdAt: category.createdAt,
+      updatedAt: category.updatedAt,
+      productCount: category._count.products,
+    };
+  }
+
   private readonly departmentFields = [
     'name',
     'posDepartmentNumber',
@@ -2497,6 +2942,14 @@ export class ProductService {
     'isActive',
   ];
 
+  private readonly categoryFields = [
+    'name',
+    'departmentId',
+    'brand',
+    'description',
+    'isActive',
+  ];
+
   private readonly priceGroupFields = [
     'name',
     'description',
@@ -2507,7 +2960,7 @@ export class ProductService {
   private readonly productInclude = {
     department: true,
     priceGroup: true,
-    productCategory: true,
+    productCategory: { include: { department: true } },
     tax: true,
     store: true,
   } satisfies Prisma.ProductInclude;
@@ -2565,6 +3018,14 @@ type DepartmentUpdateData = {
   allowEbt?: boolean;
   allowManualRingUp?: boolean;
   onPos?: boolean;
+  isActive?: boolean;
+};
+
+type CategoryUpdateData = {
+  name?: string;
+  departmentId?: string;
+  brand?: string | null;
+  description?: string | null;
   isActive?: boolean;
 };
 

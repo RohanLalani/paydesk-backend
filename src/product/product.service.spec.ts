@@ -96,6 +96,7 @@ describe('ProductService item editor APIs', () => {
     priceGroup: { findFirst: jest.Mock };
     productCategory: { findFirst: jest.Mock };
     tax: { findFirst: jest.Mock };
+    store: { update: jest.Mock };
     product: { findFirst: jest.Mock; create?: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -128,10 +129,12 @@ describe('ProductService item editor APIs', () => {
       priceGroup: { findFirst: jest.fn() },
       productCategory: { findFirst: jest.fn() },
       tax: { findFirst: jest.fn().mockResolvedValue({ id: 'tax-1' }) },
+      store: { update: jest.fn().mockResolvedValue({ nextProductNumber: 8 }) },
       product: { findFirst: jest.fn() },
       $transaction: jest.fn(
         async (callback: (tx: unknown) => Promise<unknown>) =>
           callback({
+            store: prisma.store,
             product: {
               create: txProductCreate,
             },
@@ -164,6 +167,7 @@ describe('ProductService item editor APIs', () => {
     });
     expect(prisma.productCategory.findFirst).toHaveBeenCalledWith({
       where: { id: '__optional_category_not_selected__' },
+      include: { department: true },
     });
   });
 
@@ -258,7 +262,7 @@ describe('ProductService item editor APIs', () => {
       include: {
         department: true,
         priceGroup: true,
-        productCategory: true,
+        productCategory: { include: { department: true } },
         tax: true,
         store: true,
       },

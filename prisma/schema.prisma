@@ -319,10 +319,11 @@ model Employee {
 }
 
 model Store {
-  id           String            @id @default(uuid())
-  name         String
-  address      String?
-  businessType StoreBusinessType @default(other)
+  id                String            @id @default(uuid())
+  name              String
+  address           String?
+  businessType      StoreBusinessType @default(other)
+  nextProductNumber Int               @default(1)
 
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
@@ -564,6 +565,7 @@ model SubscriptionAddon {
 
 model Product {
   id                             String          @id @default(uuid())
+  productNumber                  Int
   barcode                        String
   name                           String
   saleType                       ProductSaleType
@@ -619,7 +621,9 @@ model Product {
   cartItems        CartItem[]
 
   @@unique([storeId, barcode])
+  @@unique([storeId, productNumber])
   @@index([storeId, isActive])
+  @@index([storeId, productNumber])
   @@index([departmentId])
   @@index([priceGroupId])
   @@index([productCategoryId])
@@ -651,7 +655,8 @@ model Department {
   defaultTaxId String?
   defaultTax   Tax?    @relation(fields: [defaultTaxId], references: [id])
 
-  products Product[]
+  products          Product[]
+  productCategories ProductCategory[]
 
   @@unique([storeId, name])
   @@unique([storeId, posDepartmentNumber])
@@ -721,10 +726,14 @@ model ProductCategory {
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+
   products Product[]
 
-  @@unique([storeId, name])
+  @@unique([storeId, departmentId, name])
   @@index([storeId, isActive])
+  @@index([departmentId])
 }
 
 model Tax {

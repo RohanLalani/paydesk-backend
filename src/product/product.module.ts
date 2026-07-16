@@ -4,14 +4,18 @@ import { PrismaService } from '../prisma.service';
 import { PriceGroupMismatchRefreshService } from './price-group-mismatch-refresh.service';
 import { ProductController } from './product.controller';
 import { ProductService } from './product.service';
+import { StoreCategoriesController } from './store-categories.controller';
 import { StoreDepartmentsController } from './store-departments.controller';
 import { StorePriceGroupsController } from './store-price-groups.controller';
+import { StoreProductsController } from './store-products.controller';
 
 @Module({
   controllers: [
     ProductController,
+    StoreCategoriesController,
     StoreDepartmentsController,
     StorePriceGroupsController,
+    StoreProductsController,
   ],
   providers: [
     ProductService,
