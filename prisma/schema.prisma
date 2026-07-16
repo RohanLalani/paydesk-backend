@@ -689,12 +689,15 @@ model InventoryLog {
 }
 
 model PriceGroup {
-  id          String   @id @default(uuid())
-  name        String
-  description String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                     String    @id @default(uuid())
+  name                   String
+  description            String?
+  defaultUnitRetail      Decimal   @default(0.00) @db.Decimal(12, 2)
+  mismatchedItemCount    Int       @default(0)
+  mismatchCountUpdatedAt DateTime?
+  isActive               Boolean   @default(true)
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
@@ -703,6 +706,7 @@ model PriceGroup {
 
   @@unique([storeId, name])
   @@index([storeId, isActive])
+  @@index([storeId, mismatchedItemCount])
 }
 
 model ProductCategory {

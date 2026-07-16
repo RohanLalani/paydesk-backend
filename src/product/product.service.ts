@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -18,6 +19,8 @@ import { PrismaService } from '../prisma.service';
 
 @Injectable()
 export class ProductService {
+  private readonly logger = new Logger(ProductService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
@@ -251,28 +254,216 @@ export class ProductService {
     body: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    const dto = {
-      storeId: this.requiredString(body.storeId, 'storeId'),
-      name: this.requiredString(body.name, 'name'),
-      description: this.optionalString(body.description, 'description'),
+    const storeId = this.requiredString(body.storeId, 'storeId');
+    return this.createStorePriceGroup(storeId, body, user);
+  }
+
+  async listPriceGroups(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+
+    const priceGroups = await this.prisma.priceGroup.findMany({
+      where: { storeId, isActive: true },
+      orderBy: { name: 'asc' },
+      include: { _count: { select: { products: true } } },
+    });
+
+    return priceGroups.map((priceGroup) =>
+      this.serializePriceGroup(priceGroup),
+    );
+  }
+
+  async listStorePriceGroups(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const active = this.optionalQueryBoolean(query.active, 'active');
+    const search = this.optionalSearch(query.search, 'search');
+
+    const priceGroups = await this.prisma.priceGroup.findMany({
+      where: {
+        storeId,
+        ...(active === undefined ? {} : { isActive: active }),
+        ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
+      },
+      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+      include: { _count: { select: { products: true } } },
+    });
+
+    return {
+      items: priceGroups.map((priceGroup) =>
+        this.serializePriceGroup(priceGroup),
+      ),
+      total: priceGroups.length,
     };
-    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
+  }
+
+  async createStorePriceGroup(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const dto = this.parseCreatePriceGroupBody(body);
+    await this.ensurePriceGroupNameAvailable(storeId, dto.name);
 
     try {
-      return await this.prisma.priceGroup.create({ data: dto });
+      const priceGroup = await this.prisma.priceGroup.create({
+        data: {
+          ...dto,
+          storeId,
+          mismatchCountUpdatedAt: new Date(),
+        },
+        include: { _count: { select: { products: true } } },
+      });
+
+      return this.serializePriceGroup(priceGroup);
     } catch (error) {
       this.handleSetupNameConflict(error, 'price group');
       throw error;
     }
   }
 
-  async listPriceGroups(storeId: string, user: AuthTokenPayload) {
+  async getStorePriceGroup(
+    storeId: string,
+    priceGroupId: string,
+    user: AuthTokenPayload,
+  ) {
     await this.access.ensureStoreAccess(storeId, user, 'manage_products');
-
-    return this.prisma.priceGroup.findMany({
-      where: { storeId, isActive: true },
-      orderBy: { name: 'asc' },
+    const priceGroup = await this.prisma.priceGroup.findFirst({
+      where: { id: priceGroupId, storeId },
+      include: { _count: { select: { products: true } } },
     });
+
+    if (!priceGroup) {
+      throw new NotFoundException('Price group not found');
+    }
+
+    return this.serializePriceGroup(priceGroup);
+  }
+
+  async updateStorePriceGroup(
+    storeId: string,
+    priceGroupId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const priceGroup = await this.findPriceGroupInStoreOrThrow(
+      priceGroupId,
+      storeId,
+    );
+    const data = this.parseUpdatePriceGroupBody(body);
+
+    if (data.name !== undefined) {
+      await this.ensurePriceGroupNameAvailable(
+        storeId,
+        data.name,
+        priceGroupId,
+      );
+    }
+
+    const defaultPriceChanged =
+      data.defaultUnitRetail !== undefined &&
+      !new Prisma.Decimal(data.defaultUnitRetail).equals(
+        priceGroup.defaultUnitRetail,
+      );
+
+    try {
+      const updated = await this.prisma.priceGroup.update({
+        where: { id: priceGroupId },
+        data,
+        include: { _count: { select: { products: true } } },
+      });
+
+      if (defaultPriceChanged) {
+        await this.safeRecountPriceGroups([priceGroupId]);
+        return this.getStorePriceGroup(storeId, priceGroupId, user);
+      }
+
+      return this.serializePriceGroup(updated);
+    } catch (error) {
+      this.handleSetupNameConflict(error, 'price group');
+      throw error;
+    }
+  }
+
+  async listStorePriceGroupProducts(
+    storeId: string,
+    priceGroupId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const priceGroup = await this.findPriceGroupInStoreOrThrow(
+      priceGroupId,
+      storeId,
+    );
+    const search = this.optionalSearch(query.search, 'search');
+    const matchFilter = this.optionalSort(
+      query.match,
+      ['all', 'matches', 'mismatches'],
+      'all',
+      'match',
+    );
+    const pagination = this.parsePageLimit(query);
+
+    const where: Prisma.ProductWhereInput = {
+      storeId,
+      priceGroupId,
+      ...(search
+        ? {
+            OR: [
+              { barcode: { contains: search, mode: 'insensitive' } },
+              { name: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const products = await this.prisma.product.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      include: { department: true },
+    });
+    const defaultCents = this.toCents(priceGroup.defaultUnitRetail);
+    const items = products
+      .map((product) => {
+        const matchesDefaultUnitRetail =
+          this.toCents(product.unitRetail) === defaultCents;
+
+        return {
+          id: product.id,
+          barcode: product.barcode,
+          name: product.name,
+          departmentName: product.department?.name ?? null,
+          unitRetail: product.unitRetail,
+          defaultUnitRetail: priceGroup.defaultUnitRetail.toFixed(2),
+          isActive: product.isActive,
+          matchesDefaultUnitRetail,
+        };
+      })
+      .filter((product) => {
+        if (matchFilter === 'matches') return product.matchesDefaultUnitRetail;
+        if (matchFilter === 'mismatches')
+          return !product.matchesDefaultUnitRetail;
+        return true;
+      })
+      .sort((a, b) => {
+        if (a.matchesDefaultUnitRetail !== b.matchesDefaultUnitRetail) {
+          return a.matchesDefaultUnitRetail ? 1 : -1;
+        }
+
+        return a.name.localeCompare(b.name);
+      });
+
+    return {
+      items: items.slice(pagination.skip, pagination.skip + pagination.limit),
+      total: items.length,
+      page: pagination.page,
+      limit: pagination.limit,
+    };
   }
 
   async updatePriceGroup(
@@ -281,27 +472,7 @@ export class ProductService {
     user: AuthTokenPayload,
   ) {
     const priceGroup = await this.findPriceGroupOrThrow(id);
-    await this.access.ensureStoreAccess(
-      priceGroup.storeId,
-      user,
-      'manage_products',
-    );
-    const data: Prisma.PriceGroupUpdateInput = {};
-
-    if (body.name !== undefined) {
-      data.name = this.requiredString(body.name, 'name');
-    }
-
-    if (body.description !== undefined) {
-      data.description = this.optionalString(body.description, 'description');
-    }
-
-    try {
-      return await this.prisma.priceGroup.update({ where: { id }, data });
-    } catch (error) {
-      this.handleSetupNameConflict(error, 'price group');
-      throw error;
-    }
+    return this.updateStorePriceGroup(priceGroup.storeId, id, body, user);
   }
 
   async deletePriceGroup(id: string, user: AuthTokenPayload) {
@@ -310,10 +481,6 @@ export class ProductService {
       priceGroup.storeId,
       user,
       'manage_products',
-    );
-    await this.ensureSetupTableNotInUse(
-      { priceGroupId: id },
-      'Price group is used by products and cannot be deleted',
     );
 
     return this.prisma.priceGroup.update({
@@ -480,7 +647,7 @@ export class ProductService {
     const calculated = this.calculateProductFields(dto);
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const product = await this.prisma.$transaction(async (tx) => {
         const product = await tx.product.create({
           data: {
             ...dto,
@@ -506,6 +673,8 @@ export class ProductService {
 
         return product;
       });
+      await this.safeRecountPriceGroups([product.priceGroupId]);
+      return product;
     } catch (error) {
       this.handleBarcodeConflict(error);
       throw error;
@@ -565,7 +734,7 @@ export class ProductService {
     }
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const updated = await this.prisma.$transaction(async (tx) => {
         const updated = await tx.product.update({
           where: { id: productId },
           data,
@@ -590,6 +759,17 @@ export class ProductService {
 
         return updated;
       });
+      if (
+        dto.priceGroupId !== undefined ||
+        dto.unitRetail !== undefined ||
+        dto.isActive !== undefined
+      ) {
+        await this.safeRecountPriceGroups([
+          product.priceGroupId,
+          updated.priceGroupId,
+        ]);
+      }
+      return updated;
     } catch (error) {
       this.handleBarcodeConflict(error);
       throw error;
@@ -665,11 +845,13 @@ export class ProductService {
       'manage_products',
     );
 
-    return this.prisma.product.update({
+    const removed = await this.prisma.product.update({
       where: { id: productId },
       data: { isActive: false },
       include: this.productInclude,
     });
+    await this.safeRecountPriceGroups([product.priceGroupId]);
+    return removed;
   }
 
   async receiveInventory(
@@ -905,6 +1087,18 @@ export class ProductService {
   private async findPriceGroupOrThrow(id: string) {
     const priceGroup = await this.prisma.priceGroup.findUnique({
       where: { id },
+    });
+
+    if (!priceGroup) {
+      throw new NotFoundException('Price group not found');
+    }
+
+    return priceGroup;
+  }
+
+  private async findPriceGroupInStoreOrThrow(id: string, storeId: string) {
+    const priceGroup = await this.prisma.priceGroup.findFirst({
+      where: { id, storeId },
     });
 
     if (!priceGroup) {
@@ -1207,6 +1401,7 @@ export class ProductService {
           false,
         ) ?? false,
       taxStyle: this.requiredEnum(body.taxStyle, 'taxStyle', TaxStyle),
+      isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
     };
   }
 
@@ -1328,6 +1523,8 @@ export class ProductService {
       );
     if (body.taxStyle !== undefined)
       updates.taxStyle = this.requiredEnum(body.taxStyle, 'taxStyle', TaxStyle);
+    if (body.isActive !== undefined)
+      updates.isActive = this.requiredBoolean(body.isActive, 'isActive');
 
     return updates;
   }
@@ -1519,6 +1716,186 @@ export class ProductService {
     }
 
     return data;
+  }
+
+  private parseCreatePriceGroupBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, this.priceGroupFields);
+
+    return {
+      name: this.normalizePriceGroupName(body.name),
+      description: this.optionalString(body.description, 'description'),
+      defaultUnitRetail: this.requiredCurrency(
+        body.defaultUnitRetail,
+        'defaultUnitRetail',
+      ),
+      isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
+    };
+  }
+
+  private parseUpdatePriceGroupBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, this.priceGroupFields);
+    const data: PriceGroupUpdateData = {};
+
+    if (body.name !== undefined) {
+      data.name = this.normalizePriceGroupName(body.name);
+    }
+
+    if (body.description !== undefined) {
+      data.description = this.optionalString(body.description, 'description');
+    }
+
+    if (body.defaultUnitRetail !== undefined) {
+      data.defaultUnitRetail = this.requiredCurrency(
+        body.defaultUnitRetail,
+        'defaultUnitRetail',
+      );
+    }
+
+    if (body.isActive !== undefined) {
+      data.isActive = this.requiredBoolean(body.isActive, 'isActive');
+    }
+
+    if (!Object.keys(data).length) {
+      throw new BadRequestException(
+        'At least one price group field is required',
+      );
+    }
+
+    return data;
+  }
+
+  private normalizePriceGroupName(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('name is required');
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      throw new BadRequestException('name is required');
+    }
+
+    if (normalized.length > 100) {
+      throw new BadRequestException('name must be 100 characters or fewer');
+    }
+
+    if (
+      [...normalized].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      throw new BadRequestException('name contains unsupported characters');
+    }
+
+    return normalized;
+  }
+
+  private requiredCurrency(value: unknown, field: string) {
+    const parsed = this.requiredDecimal(value, field, 2);
+
+    if (parsed < 0) {
+      throw new BadRequestException(`${field} must be zero or greater`);
+    }
+
+    if (parsed > 9999999999.99) {
+      throw new BadRequestException(`${field} is too large`);
+    }
+
+    return new Prisma.Decimal(parsed);
+  }
+
+  private async ensurePriceGroupNameAvailable(
+    storeId: string,
+    name: string,
+    ignoreId?: string,
+  ) {
+    const normalized = name.toLocaleLowerCase();
+    const priceGroups = await this.prisma.priceGroup.findMany({
+      where: {
+        storeId,
+        ...(ignoreId ? { NOT: { id: ignoreId } } : {}),
+      },
+      select: { name: true },
+    });
+    const duplicate = priceGroups.some(
+      (priceGroup) =>
+        priceGroup.name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() ===
+        normalized,
+    );
+
+    if (duplicate) {
+      throw new ConflictException(
+        'A price group with this name already exists in this store.',
+      );
+    }
+  }
+
+  async recountPriceGroupMismatchCache(priceGroupId: string) {
+    const priceGroup = await this.prisma.priceGroup.findUnique({
+      where: { id: priceGroupId },
+      select: { id: true, defaultUnitRetail: true },
+    });
+
+    if (!priceGroup) {
+      return null;
+    }
+
+    const defaultCents = this.toCents(priceGroup.defaultUnitRetail);
+    const products = await this.prisma.product.findMany({
+      where: { priceGroupId },
+      select: { unitRetail: true },
+    });
+    const mismatchedItemCount = products.filter(
+      (product) => this.toCents(product.unitRetail) !== defaultCents,
+    ).length;
+
+    return this.prisma.priceGroup.update({
+      where: { id: priceGroupId },
+      data: {
+        mismatchedItemCount,
+        mismatchCountUpdatedAt: new Date(),
+      },
+    });
+  }
+
+  async refreshAllPriceGroupMismatchCaches() {
+    const priceGroups = await this.prisma.priceGroup.findMany({
+      where: { isActive: true },
+      select: { id: true },
+    });
+
+    for (const priceGroup of priceGroups) {
+      try {
+        await this.recountPriceGroupMismatchCache(priceGroup.id);
+      } catch (error) {
+        this.logger.warn(
+          `Price group mismatch recount failed for ${priceGroup.id}: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        );
+      }
+    }
+  }
+
+  private async safeRecountPriceGroups(ids: Array<string | null | undefined>) {
+    const uniqueIds = [...new Set(ids.filter(Boolean))] as string[];
+
+    for (const id of uniqueIds) {
+      try {
+        await this.recountPriceGroupMismatchCache(id);
+      } catch (error) {
+        this.logger.warn(
+          `Price group mismatch recount failed for ${id}: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        );
+      }
+    }
+  }
+
+  private toCents(value: number | Prisma.Decimal) {
+    return Math.round(Number(value) * 100);
   }
 
   private ensureAllowedFields(
@@ -2082,6 +2459,26 @@ export class ProductService {
     };
   }
 
+  private serializePriceGroup(
+    priceGroup: Prisma.PriceGroupGetPayload<{
+      include: { _count: { select: { products: true } } };
+    }>,
+  ) {
+    return {
+      id: priceGroup.id,
+      storeId: priceGroup.storeId,
+      name: priceGroup.name,
+      description: priceGroup.description,
+      defaultUnitRetail: priceGroup.defaultUnitRetail.toFixed(2),
+      mismatchedItemCount: priceGroup.mismatchedItemCount,
+      mismatchCountUpdatedAt: priceGroup.mismatchCountUpdatedAt,
+      isActive: priceGroup.isActive,
+      createdAt: priceGroup.createdAt,
+      updatedAt: priceGroup.updatedAt,
+      productCount: priceGroup._count.products,
+    };
+  }
+
   private readonly departmentFields = [
     'name',
     'posDepartmentNumber',
@@ -2097,6 +2494,13 @@ export class ProductService {
     'defaultAllowEbt',
     'allowManualRingUp',
     'onPos',
+    'isActive',
+  ];
+
+  private readonly priceGroupFields = [
+    'name',
+    'description',
+    'defaultUnitRetail',
     'isActive',
   ];
 
@@ -2142,6 +2546,7 @@ type ProductCreateDto = ProductCalculationInput & {
   trackInventory: boolean;
   allowNegativeInventory: boolean;
   taxStyle: TaxStyle;
+  isActive: boolean;
 };
 
 type ProductUpdateDto = Partial<Omit<ProductCreateDto, 'storeId'>>;
@@ -2160,6 +2565,13 @@ type DepartmentUpdateData = {
   allowEbt?: boolean;
   allowManualRingUp?: boolean;
   onPos?: boolean;
+  isActive?: boolean;
+};
+
+type PriceGroupUpdateData = {
+  name?: string;
+  description?: string | null;
+  defaultUnitRetail?: Prisma.Decimal;
   isActive?: boolean;
 };
 
