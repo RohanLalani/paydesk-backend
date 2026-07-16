@@ -51,6 +51,116 @@ export class ProductService {
     });
   }
 
+  async listStoreDepartments(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const active = this.optionalQueryBoolean(query.active, 'active');
+    const search = this.optionalSearch(query.search, 'search');
+    const sort = this.optionalSort(
+      query.sort,
+      ['name', 'createdAt', 'updatedAt'],
+      'name',
+      'sort',
+    );
+    const order = this.optionalSort(
+      query.order,
+      ['asc', 'desc'],
+      'asc',
+      'order',
+    );
+    const pagination = this.parsePageLimit(query);
+    const where: Prisma.DepartmentWhereInput = {
+      storeId,
+      ...(active === undefined ? {} : { isActive: active }),
+      ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
+    };
+
+    const [departments, total] = await Promise.all([
+      this.prisma.department.findMany({
+        where,
+        orderBy: { [sort]: order },
+        skip: pagination.skip,
+        take: pagination.limit,
+        include: {
+          _count: {
+            select: { products: true },
+          },
+        },
+      }),
+      this.prisma.department.count({ where }),
+    ]);
+
+    return {
+      items: departments.map((department) => ({
+        id: department.id,
+        storeId: department.storeId,
+        name: department.name,
+        defaultAllowEbt: department.defaultAllowEbt,
+        isActive: department.isActive,
+        createdAt: department.createdAt,
+        updatedAt: department.updatedAt,
+        productCount: department._count.products,
+      })),
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+    };
+  }
+
+  async createStoreDepartment(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const dto = this.parseCreateDepartmentBody(body);
+    await this.ensureDepartmentNameAvailable(storeId, dto.name);
+
+    try {
+      return await this.prisma.department.create({
+        data: { storeId, ...dto },
+      });
+    } catch (error) {
+      this.handleDepartmentNameConflict(error);
+      throw error;
+    }
+  }
+
+  async updateStoreDepartment(
+    storeId: string,
+    departmentId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const department = await this.findDepartmentInStoreOrThrow(
+      departmentId,
+      storeId,
+    );
+    const data = this.parseUpdateDepartmentBody(body);
+
+    if (data.name !== undefined) {
+      await this.ensureDepartmentNameAvailable(
+        storeId,
+        data.name,
+        department.id,
+      );
+    }
+
+    try {
+      return await this.prisma.department.update({
+        where: { id: department.id },
+        data,
+      });
+    } catch (error) {
+      this.handleDepartmentNameConflict(error);
+      throw error;
+    }
+  }
+
   async updateDepartment(
     id: string,
     body: Record<string, unknown>,
@@ -731,6 +841,18 @@ export class ProductService {
     return department;
   }
 
+  private async findDepartmentInStoreOrThrow(id: string, storeId: string) {
+    const department = await this.prisma.department.findFirst({
+      where: { id, storeId },
+    });
+
+    if (!department) {
+      throw new NotFoundException('Department not found');
+    }
+
+    return department;
+  }
+
   private async findPriceGroupOrThrow(id: string) {
     const priceGroup = await this.prisma.priceGroup.findUnique({
       where: { id },
@@ -1133,6 +1255,184 @@ export class ProductService {
     };
   }
 
+  private parsePageLimit(query: Record<string, unknown>) {
+    const page = this.optionalPositiveQueryInt(query.page, 'page') ?? 1;
+    const limit = this.optionalPositiveQueryInt(query.limit, 'limit') ?? 100;
+    const safeLimit = Math.min(limit, 100);
+
+    return {
+      page,
+      limit: safeLimit,
+      skip: (page - 1) * safeLimit,
+    };
+  }
+
+  private parseCreateDepartmentBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, ['name', 'defaultAllowEbt', 'isActive']);
+
+    return {
+      name: this.normalizeDepartmentName(body.name),
+      defaultAllowEbt:
+        this.optionalBoolean(body.defaultAllowEbt, 'defaultAllowEbt', false) ??
+        false,
+      isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
+    };
+  }
+
+  private parseUpdateDepartmentBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, ['name', 'defaultAllowEbt', 'isActive']);
+
+    const data: DepartmentUpdateData = {};
+
+    if (body.name !== undefined) {
+      data.name = this.normalizeDepartmentName(body.name);
+    }
+
+    if (body.defaultAllowEbt !== undefined) {
+      data.defaultAllowEbt = this.requiredBoolean(
+        body.defaultAllowEbt,
+        'defaultAllowEbt',
+      );
+    }
+
+    if (body.isActive !== undefined) {
+      data.isActive = this.requiredBoolean(body.isActive, 'isActive');
+    }
+
+    if (!Object.keys(data).length) {
+      throw new BadRequestException(
+        'At least one department field is required',
+      );
+    }
+
+    return data;
+  }
+
+  private ensureAllowedFields(
+    body: Record<string, unknown>,
+    allowedFields: string[],
+  ) {
+    const allowed = new Set(allowedFields);
+    const unknown = Object.keys(body).find((key) => !allowed.has(key));
+
+    if (unknown) {
+      throw new BadRequestException(`${unknown} is not allowed`);
+    }
+  }
+
+  private normalizeDepartmentName(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('name is required');
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (normalized.length < 2) {
+      throw new BadRequestException(
+        'Department name must be at least 2 characters',
+      );
+    }
+
+    if (normalized.length > 100) {
+      throw new BadRequestException(
+        'Department name must be 100 characters or fewer',
+      );
+    }
+
+    if (
+      [...normalized].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      throw new BadRequestException(
+        'Department name contains unsupported characters',
+      );
+    }
+
+    if (!/^[-A-Za-z0-9 '&/() ]+$/.test(normalized)) {
+      throw new BadRequestException(
+        'Department name contains unsupported characters',
+      );
+    }
+
+    return normalized;
+  }
+
+  private async ensureDepartmentNameAvailable(
+    storeId: string,
+    name: string,
+    currentDepartmentId?: string,
+  ) {
+    const existing = await this.prisma.department.findFirst({
+      where: {
+        storeId,
+        name: { equals: name, mode: 'insensitive' },
+        ...(currentDepartmentId ? { id: { not: currentDepartmentId } } : {}),
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      throw new ConflictException(
+        'A department with this name already exists in this store.',
+      );
+    }
+  }
+
+  private optionalQueryBoolean(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    if (value === 'true' || value === true) {
+      return true;
+    }
+
+    if (value === 'false' || value === false) {
+      return false;
+    }
+
+    throw new BadRequestException(`${field} must be true or false`);
+  }
+
+  private optionalSearch(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    if (typeof value !== 'string') {
+      throw new BadRequestException(`${field} must be a string`);
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (normalized.length > 100) {
+      throw new BadRequestException(`${field} must be 100 characters or fewer`);
+    }
+
+    return normalized || undefined;
+  }
+
+  private optionalSort<T extends string>(
+    value: unknown,
+    allowedValues: readonly T[],
+    fallback: T,
+    field: string,
+  ) {
+    if (value === undefined || value === null || value === '') {
+      return fallback;
+    }
+
+    if (typeof value !== 'string' || !allowedValues.includes(value as T)) {
+      throw new BadRequestException(
+        `${field} must be one of ${allowedValues.join(', ')}`,
+      );
+    }
+
+    return value as T;
+  }
+
   private isObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
@@ -1362,6 +1662,17 @@ export class ProductService {
     }
   }
 
+  private handleDepartmentNameConflict(error: unknown) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      throw new ConflictException(
+        'A department with this name already exists in this store.',
+      );
+    }
+  }
+
   private readonly productInclude = {
     department: true,
     priceGroup: true,
@@ -1407,6 +1718,12 @@ type ProductCreateDto = ProductCalculationInput & {
 };
 
 type ProductUpdateDto = Partial<Omit<ProductCreateDto, 'storeId'>>;
+
+type DepartmentUpdateData = {
+  name?: string;
+  defaultAllowEbt?: boolean;
+  isActive?: boolean;
+};
 
 type InventoryReceiveDto = {
   storeId: string;

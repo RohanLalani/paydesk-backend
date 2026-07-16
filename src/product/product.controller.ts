@@ -36,6 +36,47 @@ export class ProductController {
     return this.productService.listDepartments(storeId, request.user);
   }
 
+  @Get('stores/:storeId/departments')
+  listStoreDepartments(
+    @Param('storeId') storeId: string,
+    @Query() query: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listStoreDepartments(
+      storeId,
+      request.user,
+      query,
+    );
+  }
+
+  @Post('stores/:storeId/departments')
+  createStoreDepartment(
+    @Param('storeId') storeId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.createStoreDepartment(
+      storeId,
+      body,
+      request.user,
+    );
+  }
+
+  @Patch('stores/:storeId/departments/:departmentId')
+  updateStoreDepartment(
+    @Param('storeId') storeId: string,
+    @Param('departmentId') departmentId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.updateStoreDepartment(
+      storeId,
+      departmentId,
+      body,
+      request.user,
+    );
+  }
+
   @Patch('department/:id')
   updateDepartment(
     @Param('id') id: string,

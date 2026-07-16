@@ -195,6 +195,237 @@ describe('ProductService item editor APIs', () => {
   });
 });
 
+describe('ProductService department management APIs', () => {
+  let service: ProductService;
+  let prisma: {
+    department: {
+      findFirst: jest.Mock;
+      findMany: jest.Mock;
+      count: jest.Mock;
+      create: jest.Mock;
+      update: jest.Mock;
+    };
+  };
+  let access: { ensureStoreAccess: jest.Mock };
+
+  const user = {
+    accountId: 'owner-1',
+    staffId: 'staff-owner-1',
+    role: StaffRole.owner,
+    type: StaffRole.owner,
+  };
+
+  beforeEach(() => {
+    prisma = {
+      department: {
+        findFirst: jest.fn(),
+        findMany: jest.fn(),
+        count: jest.fn(),
+        create: jest.fn(),
+        update: jest.fn(),
+      },
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new ProductService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  it('creates a normalized department for an authorized store', async () => {
+    prisma.department.findFirst.mockResolvedValue(null);
+    prisma.department.create.mockResolvedValue(
+      departmentFixture({ name: 'Cold Drinks' }),
+    );
+
+    await expect(
+      service.createStoreDepartment(
+        'store-1',
+        {
+          name: '  Cold   Drinks  ',
+          defaultAllowEbt: true,
+          isActive: true,
+        },
+        user,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ name: 'Cold Drinks' }));
+
+    expect(access.ensureStoreAccess).toHaveBeenCalledWith(
+      'store-1',
+      user,
+      'manage_products',
+    );
+    expect(prisma.department.create).toHaveBeenCalledWith({
+      data: {
+        storeId: 'store-1',
+        name: 'Cold Drinks',
+        defaultAllowEbt: true,
+        isActive: true,
+      },
+    });
+  });
+
+  it('rejects whitespace-only names', async () => {
+    await expect(
+      service.createStoreDepartment(
+        'store-1',
+        { name: '   ', defaultAllowEbt: false, isActive: true },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.department.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate names in the same store case-insensitively', async () => {
+    prisma.department.findFirst.mockResolvedValue(
+      departmentFixture({ id: 'department-existing', name: 'Beverages' }),
+    );
+
+    await expect(
+      service.createStoreDepartment(
+        'store-1',
+        { name: ' beverages ', defaultAllowEbt: false, isActive: true },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(prisma.department.create).not.toHaveBeenCalled();
+  });
+
+  it('allows unchanged current name during edit', async () => {
+    prisma.department.findFirst
+      .mockResolvedValueOnce(departmentFixture())
+      .mockResolvedValueOnce(null);
+    prisma.department.update.mockResolvedValue(
+      departmentFixture({ defaultAllowEbt: true }),
+    );
+
+    await expect(
+      service.updateStoreDepartment(
+        'store-1',
+        'department-1',
+        { name: 'Beverages', defaultAllowEbt: true },
+        user,
+      ),
+    ).resolves.toEqual(expect.objectContaining({ defaultAllowEbt: true }));
+
+    expect(prisma.department.findFirst).toHaveBeenNthCalledWith(2, {
+      where: {
+        storeId: 'store-1',
+        name: { equals: 'Beverages', mode: 'insensitive' },
+        id: { not: 'department-1' },
+      },
+      select: { id: true },
+    });
+  });
+
+  it('rejects cross-store department updates', async () => {
+    prisma.department.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.updateStoreDepartment(
+        'store-1',
+        'department-other',
+        { name: 'Beverages' },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(Error);
+
+    expect(prisma.department.update).not.toHaveBeenCalled();
+  });
+
+  it('deactivates departments without deleting them', async () => {
+    prisma.department.findFirst.mockResolvedValue(departmentFixture());
+    prisma.department.update.mockResolvedValue(
+      departmentFixture({ isActive: false }),
+    );
+
+    await service.updateStoreDepartment(
+      'store-1',
+      'department-1',
+      { isActive: false },
+      user,
+    );
+
+    expect(prisma.department.update).toHaveBeenCalledWith({
+      where: { id: 'department-1' },
+      data: { isActive: false },
+    });
+  });
+
+  it('lists inactive departments when active=false is requested', async () => {
+    prisma.department.findMany.mockResolvedValue([
+      {
+        ...departmentFixture({ isActive: false }),
+        _count: { products: 2 },
+      },
+    ]);
+    prisma.department.count.mockResolvedValue(1);
+
+    await expect(
+      service.listStoreDepartments('store-1', user, { active: 'false' }),
+    ).resolves.toEqual({
+      items: [expect.objectContaining({ isActive: false, productCount: 2 })],
+      total: 1,
+      page: 1,
+      limit: 100,
+    });
+
+    expect(prisma.department.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { storeId: 'store-1', isActive: false },
+      }),
+    );
+  });
+
+  it('rejects invalid sort values', async () => {
+    await expect(
+      service.listStoreDepartments('store-1', user, { sort: 'barcode' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.department.findMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid limit values', async () => {
+    await expect(
+      service.listStoreDepartments('store-1', user, { limit: 'many' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.department.findMany).not.toHaveBeenCalled();
+  });
+
+  it('searches departments by name', async () => {
+    prisma.department.findMany.mockResolvedValue([
+      {
+        ...departmentFixture({ name: 'Cold Drinks' }),
+        _count: { products: 0 },
+      },
+    ]);
+    prisma.department.count.mockResolvedValue(1);
+
+    await service.listStoreDepartments('store-1', user, {
+      search: ' cold ',
+      sort: 'name',
+      order: 'asc',
+      limit: '100',
+    });
+
+    expect(prisma.department.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          storeId: 'store-1',
+          name: { contains: 'cold', mode: 'insensitive' },
+        },
+        orderBy: { name: 'asc' },
+        take: 100,
+      }),
+    );
+  });
+});
+
 function createBody(overrides: Record<string, unknown> = {}) {
   return {
     storeId: 'store-1',
@@ -219,6 +450,19 @@ function productFixture(overrides: Record<string, unknown> = {}) {
     barcode: '012345678905',
     name: 'Test Item',
     currentQuantity: 0,
+    ...overrides,
+  };
+}
+
+function departmentFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'department-1',
+    storeId: 'store-1',
+    name: 'Beverages',
+    defaultAllowEbt: false,
+    isActive: true,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-02T00:00:00.000Z'),
     ...overrides,
   };
 }
