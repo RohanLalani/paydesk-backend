@@ -182,6 +182,14 @@ enum AuditAction {
   login
   logout
   system
+  proposal_submitted
+  proposal_approved
+  proposal_rejected
+  proposal_cancelled
+  multi_pack_created
+  multi_pack_updated
+  multi_pack_deactivated
+  multi_pack_reactivated
 }
 
 enum AuditEntityType {
@@ -202,6 +210,33 @@ enum AuditEntityType {
   cart
   billing
   auth
+  multi_pack
+  multi_pack_proposal
+}
+
+enum MultiPackType {
+  MULTIPACK_DEAL
+  CASE_SALE
+}
+
+enum MultiPackStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum MultiPackProposalAction {
+  CREATE
+  UPDATE
+  DEACTIVATE
+  REACTIVATE
+}
+
+enum MultiPackProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  SUPERSEDED
 }
 
 enum CustomerTierDiscountModel {
@@ -217,6 +252,8 @@ enum StorePermissionKey {
   edit_store
   delete_store
   manage_products
+  manage_multi_pack_pricing
+  review_multi_pack_pricing
   manage_inventory
   manage_customers
   manage_employees
@@ -370,6 +407,8 @@ model Store {
 
   staff                   StoreStaff[]
   products                Product[]
+  productMultiPacks       ProductMultiPack[]
+  multiPackProposals      MultiPackProposal[]
   inventoryLogs           InventoryLog[]
   departments             Department[]
   priceGroups             PriceGroup[]
@@ -683,9 +722,11 @@ model Product {
   taxId String
   tax   Tax    @relation(fields: [taxId], references: [id])
 
-  inventoryLogs    InventoryLog[]
-  transactionItems TransactionItem[]
-  cartItems        CartItem[]
+  inventoryLogs      InventoryLog[]
+  transactionItems   TransactionItem[]
+  cartItems          CartItem[]
+  multiPacks         ProductMultiPack[]
+  multiPackProposals MultiPackProposal[]
 
   @@unique([storeId, barcode])
   @@unique([storeId, productNumber])
@@ -695,6 +736,81 @@ model Product {
   @@index([priceGroupId])
   @@index([productCategoryId])
   @@index([taxId])
+}
+
+model ProductMultiPack {
+  id String @id @default(uuid())
+
+  storeId   String
+  productId String
+
+  type            MultiPackType
+  unitsPerPack    Int
+  caseBarcode     String?
+  multiPackRetail Decimal       @db.Decimal(12, 2)
+
+  aggregateCostSnapshot Decimal? @db.Decimal(12, 4)
+  marginSnapshot        Decimal? @db.Decimal(8, 4)
+
+  status   MultiPackStatus @default(ACTIVE)
+  isActive Boolean         @default(true)
+  version  Int             @default(1)
+
+  approvedFromProposalId String?   @unique
+  approvedByActorId      String?
+  approvedAt             DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  store   Store   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, productId, isActive])
+  @@index([storeId, caseBarcode])
+  @@index([storeId, type, isActive])
+}
+
+model MultiPackProposal {
+  id String @id @default(uuid())
+
+  storeId   String
+  productId String
+
+  targetMultiPackId String?
+  action            MultiPackProposalAction
+  status            MultiPackProposalStatus @default(PENDING)
+
+  proposedType            MultiPackType
+  proposedUnitsPerPack    Int
+  proposedCaseBarcode     String?
+  proposedMultiPackRetail Decimal       @db.Decimal(12, 2)
+
+  unitCostSnapshot      Decimal? @db.Decimal(12, 4)
+  aggregateCostSnapshot Decimal? @db.Decimal(12, 4)
+  marginSnapshot        Decimal? @db.Decimal(8, 4)
+
+  productVersionSnapshot   Int?
+  multiPackVersionSnapshot Int?
+
+  submittedByActorId String?
+  submittedAt        DateTime @default(now())
+
+  reviewedByActorId String?
+  reviewedAt        DateTime?
+  reviewNote        String?
+  rejectionReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  store   Store   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, status, submittedAt])
+  @@index([storeId, productId, status])
+  @@index([targetMultiPackId, status])
+  @@index([submittedByActorId, submittedAt])
 }
 
 model Department {

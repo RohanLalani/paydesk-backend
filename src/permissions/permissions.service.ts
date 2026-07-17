@@ -43,6 +43,16 @@ const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
     description: 'Can add, edit, and delete products and catalog setup',
   },
   {
+    key: StorePermissionKey.manage_multi_pack_pricing,
+    label: 'Manage Multi-Pack Pricing',
+    description: 'Can submit multi-pack pricing changes for review',
+  },
+  {
+    key: StorePermissionKey.review_multi_pack_pricing,
+    label: 'Review Multi-Pack Pricing',
+    description: 'Can approve or reject submitted multi-pack pricing changes',
+  },
+  {
     key: StorePermissionKey.manage_inventory,
     label: 'Manage Inventory',
     description: 'Can receive, adjust, and change inventory',
