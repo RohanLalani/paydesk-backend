@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Request,
@@ -63,6 +64,19 @@ export class MultiPackController {
     return this.multiPackService.submitProposal(storeId, body, request.user);
   }
 
+  @Post('multi-pack-proposals/approve-all')
+  approveAllPendingProposals(
+    @Param('storeId') storeId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.multiPackService.approveAllPendingProposals(
+      storeId,
+      body,
+      request.user,
+    );
+  }
+
   @Get('multi-pack-proposals/:proposalId')
   getProposal(
     @Param('storeId') storeId: string,
@@ -70,6 +84,21 @@ export class MultiPackController {
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.multiPackService.getProposal(storeId, proposalId, request.user);
+  }
+
+  @Patch('multi-pack-proposals/:proposalId')
+  updateProposal(
+    @Param('storeId') storeId: string,
+    @Param('proposalId') proposalId: string,
+    @Body() body: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.multiPackService.updateProposal(
+      storeId,
+      proposalId,
+      body,
+      request.user,
+    );
   }
 
   @Post('multi-pack-proposals/:proposalId/approve')

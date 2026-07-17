@@ -26,6 +26,22 @@ type AuditRecorder = {
 };
 
 const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
+const PRICE_BOOK_SORT_FIELDS = [
+  'productNumber',
+  'barcode',
+  'name',
+  'department',
+  'category',
+  'priceGroup',
+  'unitRetail',
+  'unitCost',
+  'margin',
+  'currentQuantity',
+  'updatedAt',
+] as const;
+
+type PriceBookSortField = (typeof PRICE_BOOK_SORT_FIELDS)[number];
+type MarginStatus = 'positive' | 'zero' | 'negative' | 'unavailable';
 
 @Injectable()
 export class ProductService {
@@ -1388,6 +1404,104 @@ export class ProductService {
     });
   }
 
+  async listStoreProducts(
+    storeId: string,
+    query: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const search = this.optionalSearch(query.search, 'search');
+    const departmentId = this.optionalString(
+      query.departmentId,
+      'departmentId',
+    );
+    const categoryId = this.optionalString(query.categoryId, 'categoryId');
+    const rawPriceGroupId = this.optionalString(
+      query.priceGroupId,
+      'priceGroupId',
+    );
+    const isActive = this.optionalQueryBoolean(query.isActive, 'isActive');
+    const trackInventory = this.optionalQueryBoolean(
+      query.trackInventory,
+      'trackInventory',
+    );
+    const marginStatus = this.optionalMarginStatus(query.marginStatus);
+    const sort = this.optionalSort(
+      query.sort,
+      PRICE_BOOK_SORT_FIELDS,
+      'productNumber',
+      'sort',
+    );
+    const order = this.optionalSort(
+      query.order,
+      ['asc', 'desc'],
+      'asc',
+      'order',
+    );
+    const pagination = this.parsePriceBookPagination(query);
+    const productNumber =
+      search && this.isPositiveIntegerText(search) ? Number(search) : null;
+    const priceGroupId =
+      rawPriceGroupId === '__none__' ? null : rawPriceGroupId;
+
+    const where: Prisma.ProductWhereInput = {
+      storeId,
+      ...(departmentId ? { departmentId } : {}),
+      ...(categoryId ? { productCategoryId: categoryId } : {}),
+      ...(rawPriceGroupId
+        ? rawPriceGroupId === '__none__'
+          ? { priceGroupId: null }
+          : { priceGroupId }
+        : {}),
+      ...(isActive === undefined ? {} : { isActive }),
+      ...(trackInventory === undefined ? {} : { trackInventory }),
+      ...this.buildMarginWhere(marginStatus),
+      ...(search
+        ? {
+            OR: [
+              ...(productNumber ? [{ productNumber }] : []),
+              { barcode: search },
+              { barcode: { contains: search, mode: 'insensitive' } },
+              { name: { contains: search, mode: 'insensitive' } },
+              { nacsCode: { contains: search, mode: 'insensitive' } },
+              {
+                department: { name: { contains: search, mode: 'insensitive' } },
+              },
+              {
+                productCategory: {
+                  name: { contains: search, mode: 'insensitive' },
+                },
+              },
+              {
+                priceGroup: {
+                  name: { contains: search, mode: 'insensitive' },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        select: this.priceBookProductSelect,
+        orderBy: this.priceBookOrderBy(sort, order),
+        skip: pagination.skip,
+        take: pagination.limit,
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+
+    return {
+      items: items.map((product) => this.serializePriceBookProduct(product)),
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+      totalPages: Math.max(1, Math.ceil(total / pagination.limit)),
+    };
+  }
+
   async findByBarcode(
     storeId: string,
     barcode: string,
@@ -2248,6 +2362,85 @@ export class ProductService {
       limit: safeLimit,
       skip: (page - 1) * safeLimit,
     };
+  }
+
+  private parsePriceBookPagination(query: Record<string, unknown>) {
+    const page = this.optionalPositiveQueryInt(query.page, 'page') ?? 1;
+    const limit = this.optionalPositiveQueryInt(query.limit, 'limit') ?? 50;
+    const safeLimit = Math.min(limit, 100);
+
+    return {
+      page,
+      limit: safeLimit,
+      skip: (page - 1) * safeLimit,
+    };
+  }
+
+  private optionalMarginStatus(value: unknown): MarginStatus | undefined {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    if (
+      value === 'positive' ||
+      value === 'zero' ||
+      value === 'negative' ||
+      value === 'unavailable'
+    ) {
+      return value;
+    }
+
+    throw new BadRequestException(
+      'marginStatus must be one of positive, zero, negative, unavailable',
+    );
+  }
+
+  private buildMarginWhere(
+    marginStatus: MarginStatus | undefined,
+  ): Prisma.ProductWhereInput {
+    if (!marginStatus) return {};
+
+    if (marginStatus === 'positive') return { margin: { gt: 0 } };
+    if (marginStatus === 'zero') return { margin: 0 };
+    if (marginStatus === 'negative') return { margin: { lt: 0 } };
+    return { margin: null };
+  }
+
+  private priceBookOrderBy(
+    sort: PriceBookSortField,
+    order: 'asc' | 'desc',
+  ): Prisma.ProductOrderByWithRelationInput[] {
+    const secondary = { id: 'asc' as const };
+
+    if (sort === 'department') {
+      return [
+        { department: { name: order } },
+        { productNumber: 'asc' },
+        secondary,
+      ];
+    }
+
+    if (sort === 'category') {
+      return [
+        { productCategory: { name: order } },
+        { productNumber: 'asc' },
+        secondary,
+      ];
+    }
+
+    if (sort === 'priceGroup') {
+      return [
+        { priceGroup: { name: order } },
+        { productNumber: 'asc' },
+        secondary,
+      ];
+    }
+
+    if (sort === 'productNumber') {
+      return [{ productNumber: order }, secondary];
+    }
+
+    return [{ [sort]: order }, { productNumber: 'asc' }, secondary];
   }
 
   private parseCreateDepartmentBody(body: Record<string, unknown>) {
@@ -3505,6 +3698,68 @@ export class ProductService {
     };
   }
 
+  private serializePriceBookProduct(product: PriceBookProductRecord) {
+    return {
+      id: product.id,
+      productNumber: product.productNumber,
+      barcode: product.barcode,
+      name: product.name,
+      saleType: product.saleType,
+      unitRetail: product.unitRetail.toFixed(2),
+      onlineRetailPrice:
+        product.onlineRetailPrice === null
+          ? null
+          : product.onlineRetailPrice.toFixed(2),
+      unitCost: product.unitCost === null ? null : product.unitCost.toFixed(2),
+      unitCostAfterDiscountAndRebate:
+        product.unitCostAfterDiscountAndRebate === null
+          ? null
+          : product.unitCostAfterDiscountAndRebate.toFixed(2),
+      margin: product.margin === null ? null : product.margin.toFixed(2),
+      defaultMargin:
+        product.defaultMargin === null
+          ? null
+          : product.defaultMargin.toFixed(2),
+      unitsPerCase: product.unitsPerCase,
+      caseCost: product.caseCost === null ? null : product.caseCost.toFixed(2),
+      caseDiscount: product.caseDiscount.toFixed(2),
+      caseRebate: product.caseRebate.toFixed(2),
+      currentQuantity: product.currentQuantity,
+      minInventory: product.minInventory,
+      maxInventory: product.maxInventory,
+      trackInventory: product.trackInventory,
+      allowNegativeInventory: product.allowNegativeInventory,
+      unitOfMeasure: product.unitOfMeasure,
+      size: product.size,
+      minimumAge: product.minimumAge,
+      allowEbt: product.allowEbt,
+      isActive: product.isActive,
+      updatedAt: product.updatedAt,
+      department: {
+        id: product.department.id,
+        name: product.department.name,
+      },
+      category: product.productCategory
+        ? {
+            id: product.productCategory.id,
+            name: product.productCategory.name,
+          }
+        : null,
+      priceGroup: product.priceGroup
+        ? {
+            id: product.priceGroup.id,
+            name: product.priceGroup.name,
+          }
+        : null,
+      tax: {
+        id: product.tax.id,
+        name: product.tax.name,
+        rate: this.percentString(product.tax.rate),
+        surchargeAmount: product.tax.surchargeAmount.toFixed(2),
+      },
+    };
+  }
+
   private readonly departmentFields = [
     'name',
     'posDepartmentNumber',
@@ -3548,6 +3803,41 @@ export class ProductService {
     store: true,
   } satisfies Prisma.ProductInclude;
 
+  private readonly priceBookProductSelect = {
+    id: true,
+    productNumber: true,
+    barcode: true,
+    name: true,
+    saleType: true,
+    unitRetail: true,
+    onlineRetailPrice: true,
+    unitCost: true,
+    unitCostAfterDiscountAndRebate: true,
+    margin: true,
+    defaultMargin: true,
+    unitsPerCase: true,
+    caseCost: true,
+    caseDiscount: true,
+    caseRebate: true,
+    currentQuantity: true,
+    minInventory: true,
+    maxInventory: true,
+    trackInventory: true,
+    allowNegativeInventory: true,
+    unitOfMeasure: true,
+    size: true,
+    minimumAge: true,
+    allowEbt: true,
+    isActive: true,
+    updatedAt: true,
+    department: { select: { id: true, name: true } },
+    productCategory: { select: { id: true, name: true } },
+    priceGroup: { select: { id: true, name: true } },
+    tax: {
+      select: { id: true, name: true, rate: true, surchargeAmount: true },
+    },
+  } satisfies Prisma.ProductSelect;
+
   private readonly inventoryLogInclude = {
     product: true,
     staff: true,
@@ -3586,6 +3876,10 @@ type ProductCreateDto = ProductCalculationInput & {
 };
 
 type ProductUpdateDto = Partial<Omit<ProductCreateDto, 'storeId'>>;
+
+type PriceBookProductRecord = Prisma.ProductGetPayload<{
+  select: ProductService['priceBookProductSelect'];
+}>;
 
 type DepartmentUpdateData = {
   name?: string;

@@ -1,4 +1,11 @@
-import { Controller, Get, Param, Request, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  Request,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { ProductService } from './product.service';
@@ -22,6 +29,15 @@ export class StoreProductsController {
     @Request() request: { user: AuthTokenPayload },
   ) {
     return this.productService.getNextProductNumber(storeId, request.user);
+  }
+
+  @Get('products')
+  listStoreProducts(
+    @Param('storeId') storeId: string,
+    @Query() query: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listStoreProducts(storeId, query, request.user);
   }
 
   @Get('products/product-number/:productNumber')

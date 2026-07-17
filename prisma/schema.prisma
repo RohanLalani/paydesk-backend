@@ -183,9 +183,11 @@ enum AuditAction {
   logout
   system
   proposal_submitted
+  proposal_updated
   proposal_approved
   proposal_rejected
   proposal_cancelled
+  multi_pack_batch_sent_to_pos
   multi_pack_created
   multi_pack_updated
   multi_pack_deactivated
@@ -212,6 +214,7 @@ enum AuditEntityType {
   auth
   multi_pack
   multi_pack_proposal
+  multi_pack_batch
 }
 
 enum MultiPackType {
@@ -732,6 +735,10 @@ model Product {
   @@unique([storeId, productNumber])
   @@index([storeId, isActive])
   @@index([storeId, productNumber])
+  @@index([storeId, isActive, productNumber])
+  @@index([storeId, departmentId, productNumber])
+  @@index([storeId, productCategoryId, productNumber])
+  @@index([storeId, priceGroupId, productNumber])
   @@index([departmentId])
   @@index([priceGroupId])
   @@index([productCategoryId])

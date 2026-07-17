@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import {
   AuditAction,
   AuditEntityType,
@@ -23,6 +24,9 @@ import { PrismaService } from '../prisma.service';
 
 const MAX_UNITS_PER_PACK = 10_000;
 const MAX_REJECTION_LENGTH = 500;
+const MAX_BULK_APPROVAL_PROPOSALS = 500;
+const BULK_APPROVAL_FAILURE_MESSAGE =
+  'Some multi-pack changes need attention before they can be sent.';
 
 type ProductCostInput = {
   unitCostAfterDiscountAndRebate: number | null;
@@ -116,7 +120,7 @@ export class MultiPackService {
     query: Record<string, unknown>,
     user: AuthTokenPayload,
   ) {
-    await this.ensureCanSubmit(storeId, user);
+    await this.ensureCanReview(storeId, user);
     const pagination = this.parsePagination(query);
     const status = this.optionalEnum(
       query.status,
@@ -284,6 +288,122 @@ export class MultiPackService {
     return this.serializeProposal(proposal);
   }
 
+  async updateProposal(
+    storeId: string,
+    proposalId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.ensureCanSubmit(storeId, user);
+    const dto = this.parseProposalBody(body);
+
+    return this.prisma.$transaction(async (tx) => {
+      const proposal = await tx.multiPackProposal.findFirst({
+        where: { id: proposalId, storeId },
+        include: this.proposalInclude,
+      });
+
+      if (!proposal) {
+        throw new NotFoundException('Multi-pack proposal not found');
+      }
+
+      if (proposal.status !== MultiPackProposalStatus.PENDING) {
+        throw new ConflictException(
+          'Only pending multi-pack proposals can be edited.',
+        );
+      }
+
+      if (proposal.productId !== dto.productId) {
+        throw new BadRequestException(
+          'The selected product does not match this proposal.',
+        );
+      }
+
+      const product = await tx.product.findFirst({
+        where: { id: dto.productId, storeId, isActive: true },
+        include: {
+          department: true,
+          productCategory: true,
+        },
+      });
+
+      if (!product) {
+        throw new NotFoundException('Product not found');
+      }
+
+      const target = dto.targetMultiPackId
+        ? await tx.productMultiPack.findFirst({
+            where: { id: dto.targetMultiPackId, storeId },
+          })
+        : null;
+
+      if (dto.action !== MultiPackProposalAction.CREATE && !target) {
+        throw new BadRequestException(
+          'An active multi-pack is required for this action',
+        );
+      }
+
+      if (dto.action === MultiPackProposalAction.CREATE && target) {
+        throw new BadRequestException(
+          'New multi-pack proposals cannot target an existing configuration',
+        );
+      }
+
+      if (dto.type === MultiPackType.CASE_SALE) {
+        await this.ensureCaseBarcodeAvailable(
+          storeId,
+          dto.caseBarcode,
+          product.id,
+          target?.id ?? null,
+          tx,
+          proposal.id,
+        );
+      }
+
+      await this.ensureNoDuplicatePending(storeId, dto, proposal.id, tx);
+
+      const snapshots = this.calculateSnapshots(
+        product,
+        dto.unitsPerPack,
+        dto.multiPackRetail,
+      );
+
+      const updated = await tx.multiPackProposal.update({
+        where: { id: proposal.id },
+        data: {
+          targetMultiPackId: target?.id ?? null,
+          action: dto.action,
+          proposedType: dto.type,
+          proposedUnitsPerPack: dto.unitsPerPack,
+          proposedCaseBarcode:
+            dto.type === MultiPackType.CASE_SALE ? dto.caseBarcode : null,
+          proposedMultiPackRetail: dto.multiPackRetail,
+          unitCostSnapshot: snapshots.unitCost,
+          aggregateCostSnapshot: snapshots.aggregateCost,
+          marginSnapshot: snapshots.margin,
+          multiPackVersionSnapshot: target?.version ?? null,
+        },
+        include: this.proposalInclude,
+      });
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: user.type === StaffRole.owner ? user.accountId : null,
+        action: AuditAction.proposal_updated,
+        entityType: AuditEntityType.multi_pack_proposal,
+        entityId: updated.id,
+        entityName: product.name,
+        summary: `Updated pending multi-pack proposal for ${product.name}`,
+        before: proposal,
+        after: updated,
+        metadata: { source: 'multi_pack_pricing' },
+      });
+
+      return this.serializeProposal(updated);
+    });
+  }
+
   async approveProposal(
     storeId: string,
     proposalId: string,
@@ -303,197 +423,139 @@ export class MultiPackService {
         throw new NotFoundException('Multi-pack proposal not found');
       }
 
-      if (proposal.status !== MultiPackProposalStatus.PENDING) {
-        throw new ConflictException('This proposal has already been reviewed.');
-      }
-
-      if (
-        proposal.submittedByActorId === user.staffId &&
-        user.type !== StaffRole.owner
-      ) {
-        throw new ForbiddenException(
-          'You do not have permission to approve your own multi-pack proposal.',
-        );
-      }
-
-      const product = await tx.product.findFirst({
-        where: { id: proposal.productId, storeId, isActive: true },
-      });
-
-      if (!product) {
-        throw new NotFoundException('Product not found');
-      }
-
-      const currentTarget = proposal.targetMultiPackId
-        ? await tx.productMultiPack.findFirst({
-            where: { id: proposal.targetMultiPackId, storeId },
-          })
-        : null;
-
-      if (
-        proposal.targetMultiPackId &&
-        (!currentTarget ||
-          currentTarget.version !== proposal.multiPackVersionSnapshot)
-      ) {
-        throw new ConflictException(
-          'This proposal changed after it was submitted. Please submit it again.',
-        );
-      }
-
-      if (proposal.proposedType === MultiPackType.CASE_SALE) {
-        await this.ensureCaseBarcodeAvailable(
-          storeId,
-          proposal.proposedCaseBarcode,
-          product.id,
-          currentTarget?.id ?? null,
-          tx,
-        );
-      }
-
-      await this.ensureNoActiveDuplicateForApproval(
+      const { reviewed } = await this.applyPendingProposal(
+        tx,
         storeId,
         proposal,
-        currentTarget?.id ?? null,
-        tx,
+        user,
+        reviewNote,
       );
 
-      const snapshots = this.calculateSnapshots(
-        product,
-        proposal.proposedUnitsPerPack,
-        proposal.proposedMultiPackRetail,
-      );
+      return this.serializeProposal(reviewed);
+    });
+  }
 
-      let active = currentTarget;
-      const activeData = {
-        type: proposal.proposedType,
-        unitsPerPack: proposal.proposedUnitsPerPack,
-        caseBarcode:
-          proposal.proposedType === MultiPackType.CASE_SALE
-            ? proposal.proposedCaseBarcode
-            : null,
-        multiPackRetail: proposal.proposedMultiPackRetail,
-        aggregateCostSnapshot: snapshots.aggregateCost,
-        marginSnapshot: snapshots.margin,
-        approvedFromProposalId: proposal.id,
-        approvedByActorId: user.staffId,
-        approvedAt: new Date(),
+  async approveAllPendingProposals(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.ensureCanReview(storeId, user);
+    const requestedProposalIds = this.optionalStringArray(
+      body.proposalIds,
+      'proposalIds',
+    );
+    const where: Prisma.MultiPackProposalWhereInput = {
+      storeId,
+      status: MultiPackProposalStatus.PENDING,
+      ...(requestedProposalIds ? { id: { in: requestedProposalIds } } : {}),
+    };
+    const pendingCount = await this.prisma.multiPackProposal.count({ where });
+
+    if (pendingCount > MAX_BULK_APPROVAL_PROPOSALS) {
+      throw new BadRequestException(
+        `A maximum of ${MAX_BULK_APPROVAL_PROPOSALS} pending multi-pack changes can be sent to POS at once.`,
+      );
+    }
+
+    if (pendingCount === 0) {
+      return {
+        approvedCount: 0,
+        failedCount: 0,
+        approvedProposalIds: [],
+        failures: [],
       };
+    }
 
-      if (proposal.action === MultiPackProposalAction.CREATE) {
-        active = await tx.productMultiPack.create({
-          data: {
-            storeId,
-            productId: product.id,
-            ...activeData,
-            status: MultiPackStatus.ACTIVE,
-            isActive: true,
-          },
-        });
-        await this.writeActiveAudit(
-          tx,
-          storeId,
-          user,
-          null,
-          active,
-          product.name,
-          AuditAction.multi_pack_created,
-        );
-      } else if (proposal.action === MultiPackProposalAction.UPDATE && active) {
-        const before = active;
-        active = await tx.productMultiPack.update({
-          where: { id: active.id },
-          data: {
-            ...activeData,
-            status: MultiPackStatus.ACTIVE,
-            isActive: true,
-            version: { increment: 1 },
-          },
-        });
-        await this.writeActiveAudit(
-          tx,
-          storeId,
-          user,
-          before,
-          active,
-          product.name,
-          AuditAction.multi_pack_updated,
-        );
-      } else if (
-        proposal.action === MultiPackProposalAction.DEACTIVATE &&
-        active
-      ) {
-        const before = active;
-        active = await tx.productMultiPack.update({
-          where: { id: active.id },
-          data: {
-            status: MultiPackStatus.INACTIVE,
-            isActive: false,
-            approvedFromProposalId: proposal.id,
-            approvedByActorId: user.staffId,
-            approvedAt: new Date(),
-            version: { increment: 1 },
-          },
-        });
-        await this.writeActiveAudit(
-          tx,
-          storeId,
-          user,
-          before,
-          active,
-          product.name,
-          AuditAction.multi_pack_deactivated,
-        );
-      } else if (
-        proposal.action === MultiPackProposalAction.REACTIVATE &&
-        active
-      ) {
-        const before = active;
-        active = await tx.productMultiPack.update({
-          where: { id: active.id },
-          data: {
-            ...activeData,
-            status: MultiPackStatus.ACTIVE,
-            isActive: true,
-            version: { increment: 1 },
-          },
-        });
-        await this.writeActiveAudit(
-          tx,
-          storeId,
-          user,
-          before,
-          active,
-          product.name,
-          AuditAction.multi_pack_reactivated,
+    const batchId = randomUUID();
+
+    return this.prisma.$transaction(async (tx) => {
+      const lockedRows = requestedProposalIds
+        ? await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id"
+            FROM "MultiPackProposal"
+            WHERE "storeId" = ${storeId}
+              AND "status" = 'PENDING'
+              AND "id" IN (${Prisma.join(requestedProposalIds)})
+            ORDER BY "submittedAt" ASC
+            FOR UPDATE
+          `
+        : await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id"
+            FROM "MultiPackProposal"
+            WHERE "storeId" = ${storeId}
+              AND "status" = 'PENDING'
+            ORDER BY "submittedAt" ASC
+            FOR UPDATE
+          `;
+      const lockedIds = lockedRows.map((row) => row.id);
+
+      if (lockedIds.length !== pendingCount) {
+        throw new ConflictException(
+          'Pending multi-pack changes were updated while this batch was being sent. Please refresh and try again.',
         );
       }
 
-      const reviewed = await tx.multiPackProposal.update({
-        where: { id: proposal.id },
-        data: {
-          status: MultiPackProposalStatus.APPROVED,
-          reviewedByActorId: user.staffId,
-          reviewedAt: new Date(),
-          reviewNote,
-        },
+      const proposals = await tx.multiPackProposal.findMany({
+        where: { id: { in: lockedIds }, storeId },
         include: this.proposalInclude,
       });
+      const proposalsById = new Map(
+        proposals.map((proposal) => [proposal.id, proposal]),
+      );
+      const orderedProposals = lockedIds.map((id) => proposalsById.get(id)!);
+      const approvedProposalIds: string[] = [];
 
       await this.audit.record(tx, {
         storeId,
         actorId: user.staffId,
         ownerId: user.type === StaffRole.owner ? user.accountId : null,
-        action: AuditAction.proposal_approved,
-        entityType: AuditEntityType.multi_pack_proposal,
-        entityId: reviewed.id,
-        entityName: product.name,
-        summary: `Approved multi-pack proposal for ${product.name}`,
-        before: proposal,
-        after: reviewed,
-        metadata: { activeMultiPackId: active?.id ?? null, reviewNote },
+        action: AuditAction.multi_pack_batch_sent_to_pos,
+        entityType: AuditEntityType.multi_pack_batch,
+        entityId: batchId,
+        entityName: 'Multi-pack POS batch',
+        summary: `${pendingCount} multi-pack changes sent to POS`,
+        metadata: {
+          batchId,
+          storeId,
+          reviewerId: user.staffId,
+          approvedCount: pendingCount,
+          maxBatchSize: MAX_BULK_APPROVAL_PROPOSALS,
+          sentAt: new Date().toISOString(),
+        },
       });
 
-      return this.serializeProposal(reviewed);
+      for (const proposal of orderedProposals) {
+        try {
+          const { reviewed } = await this.applyPendingProposal(
+            tx,
+            storeId,
+            proposal,
+            user,
+            null,
+            batchId,
+          );
+          approvedProposalIds.push(reviewed.id);
+        } catch (error) {
+          throw new BadRequestException({
+            message: BULK_APPROVAL_FAILURE_MESSAGE,
+            issues: [
+              {
+                proposalId: proposal.id,
+                productName: proposal.product.name,
+                reason: this.toFriendlyBulkIssue(error),
+              },
+            ],
+          });
+        }
+      }
+
+      return {
+        approvedCount: approvedProposalIds.length,
+        failedCount: 0,
+        approvedProposalIds,
+        failures: [],
+      };
     });
   }
 
@@ -567,7 +629,11 @@ export class MultiPackService {
     const where: Prisma.AuditEventWhereInput = {
       storeId,
       entityType: {
-        in: [AuditEntityType.multi_pack, AuditEntityType.multi_pack_proposal],
+        in: [
+          AuditEntityType.multi_pack,
+          AuditEntityType.multi_pack_proposal,
+          AuditEntityType.multi_pack_batch,
+        ],
       },
     };
     const [items, total] = await Promise.all([
@@ -617,6 +683,213 @@ export class MultiPackService {
       before,
       after,
     });
+  }
+
+  private async applyPendingProposal(
+    tx: Prisma.TransactionClient,
+    storeId: string,
+    proposal: ProposalWithProduct,
+    user: AuthTokenPayload,
+    reviewNote: string | null,
+    batchId?: string,
+  ) {
+    if (proposal.status !== MultiPackProposalStatus.PENDING) {
+      throw new ConflictException('This proposal has already been reviewed.');
+    }
+
+    if (
+      proposal.submittedByActorId === user.staffId &&
+      user.type !== StaffRole.owner
+    ) {
+      throw new ForbiddenException(
+        'You do not have permission to approve your own multi-pack proposal.',
+      );
+    }
+
+    const product = await tx.product.findFirst({
+      where: { id: proposal.productId, storeId, isActive: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    const currentTarget = proposal.targetMultiPackId
+      ? await tx.productMultiPack.findFirst({
+          where: { id: proposal.targetMultiPackId, storeId },
+        })
+      : null;
+
+    if (
+      proposal.targetMultiPackId &&
+      (!currentTarget ||
+        currentTarget.version !== proposal.multiPackVersionSnapshot)
+    ) {
+      throw new ConflictException(
+        'This proposal changed after it was submitted. Please submit it again.',
+      );
+    }
+
+    if (proposal.proposedType === MultiPackType.CASE_SALE) {
+      await this.ensureCaseBarcodeAvailable(
+        storeId,
+        proposal.proposedCaseBarcode,
+        product.id,
+        currentTarget?.id ?? null,
+        tx,
+        proposal.id,
+      );
+    }
+
+    await this.ensureNoActiveDuplicateForApproval(
+      storeId,
+      proposal,
+      currentTarget?.id ?? null,
+      tx,
+    );
+
+    const snapshots = this.calculateSnapshots(
+      product,
+      proposal.proposedUnitsPerPack,
+      proposal.proposedMultiPackRetail,
+    );
+
+    let active = currentTarget;
+    const approvedAt = new Date();
+    const activeData = {
+      type: proposal.proposedType,
+      unitsPerPack: proposal.proposedUnitsPerPack,
+      caseBarcode:
+        proposal.proposedType === MultiPackType.CASE_SALE
+          ? proposal.proposedCaseBarcode
+          : null,
+      multiPackRetail: proposal.proposedMultiPackRetail,
+      aggregateCostSnapshot: snapshots.aggregateCost,
+      marginSnapshot: snapshots.margin,
+      approvedFromProposalId: proposal.id,
+      approvedByActorId: user.staffId,
+      approvedAt,
+    };
+
+    if (proposal.action === MultiPackProposalAction.CREATE) {
+      active = await tx.productMultiPack.create({
+        data: {
+          storeId,
+          productId: product.id,
+          ...activeData,
+          status: MultiPackStatus.ACTIVE,
+          isActive: true,
+        },
+      });
+      await this.writeActiveAudit(
+        tx,
+        storeId,
+        user,
+        null,
+        active,
+        product.name,
+        AuditAction.multi_pack_created,
+      );
+    } else if (proposal.action === MultiPackProposalAction.UPDATE && active) {
+      const before = active;
+      active = await tx.productMultiPack.update({
+        where: { id: active.id },
+        data: {
+          ...activeData,
+          status: MultiPackStatus.ACTIVE,
+          isActive: true,
+          version: { increment: 1 },
+        },
+      });
+      await this.writeActiveAudit(
+        tx,
+        storeId,
+        user,
+        before,
+        active,
+        product.name,
+        AuditAction.multi_pack_updated,
+      );
+    } else if (
+      proposal.action === MultiPackProposalAction.DEACTIVATE &&
+      active
+    ) {
+      const before = active;
+      active = await tx.productMultiPack.update({
+        where: { id: active.id },
+        data: {
+          status: MultiPackStatus.INACTIVE,
+          isActive: false,
+          approvedFromProposalId: proposal.id,
+          approvedByActorId: user.staffId,
+          approvedAt,
+          version: { increment: 1 },
+        },
+      });
+      await this.writeActiveAudit(
+        tx,
+        storeId,
+        user,
+        before,
+        active,
+        product.name,
+        AuditAction.multi_pack_deactivated,
+      );
+    } else if (
+      proposal.action === MultiPackProposalAction.REACTIVATE &&
+      active
+    ) {
+      const before = active;
+      active = await tx.productMultiPack.update({
+        where: { id: active.id },
+        data: {
+          ...activeData,
+          status: MultiPackStatus.ACTIVE,
+          isActive: true,
+          version: { increment: 1 },
+        },
+      });
+      await this.writeActiveAudit(
+        tx,
+        storeId,
+        user,
+        before,
+        active,
+        product.name,
+        AuditAction.multi_pack_reactivated,
+      );
+    } else {
+      throw new ConflictException(
+        'This proposal no longer matches an active multi-pack configuration.',
+      );
+    }
+
+    const reviewed = await tx.multiPackProposal.update({
+      where: { id: proposal.id },
+      data: {
+        status: MultiPackProposalStatus.APPROVED,
+        reviewedByActorId: user.staffId,
+        reviewedAt: approvedAt,
+        reviewNote,
+      },
+      include: this.proposalInclude,
+    });
+
+    await this.audit.record(tx, {
+      storeId,
+      actorId: user.staffId,
+      ownerId: user.type === StaffRole.owner ? user.accountId : null,
+      action: AuditAction.proposal_approved,
+      entityType: AuditEntityType.multi_pack_proposal,
+      entityId: reviewed.id,
+      entityName: product.name,
+      summary: `Approved multi-pack proposal for ${product.name}`,
+      before: proposal,
+      after: reviewed,
+      metadata: { activeMultiPackId: active?.id ?? null, reviewNote, batchId },
+    });
+
+    return { reviewed, active, product };
   }
 
   private async ensureCanSubmit(storeId: string, user: AuthTokenPayload) {
@@ -669,6 +942,7 @@ export class MultiPackService {
     productId: string,
     allowedMultiPackId: string | null,
     tx: Prisma.TransactionClient | PrismaService = this.prisma,
+    allowedProposalId: string | null = null,
   ) {
     if (!barcode) {
       throw new BadRequestException('Case barcode is required for case sales.');
@@ -712,6 +986,7 @@ export class MultiPackService {
         storeId,
         proposedCaseBarcode: barcode,
         status: MultiPackProposalStatus.PENDING,
+        ...(allowedProposalId ? { id: { not: allowedProposalId } } : {}),
         ...(allowedMultiPackId
           ? { targetMultiPackId: { not: allowedMultiPackId } }
           : {}),
@@ -726,11 +1001,17 @@ export class MultiPackService {
     }
   }
 
-  private async ensureNoDuplicatePending(storeId: string, dto: ProposalDto) {
-    const duplicate = await this.prisma.multiPackProposal.findFirst({
+  private async ensureNoDuplicatePending(
+    storeId: string,
+    dto: ProposalDto,
+    excludedProposalId: string | null = null,
+    tx: Prisma.TransactionClient | PrismaService = this.prisma,
+  ) {
+    const duplicate = await tx.multiPackProposal.findFirst({
       where: {
         storeId,
         productId: dto.productId,
+        ...(excludedProposalId ? { id: { not: excludedProposalId } } : {}),
         targetMultiPackId: dto.targetMultiPackId ?? null,
         action: dto.action,
         status: MultiPackProposalStatus.PENDING,
@@ -926,7 +1207,7 @@ export class MultiPackService {
     const page = this.optionalPositiveInteger(query.page, 'page') ?? 1;
     const limit = Math.min(
       this.optionalPositiveInteger(query.limit, 'limit') ?? 25,
-      100,
+      MAX_BULK_APPROVAL_PROPOSALS,
     );
     return { page, limit, skip: (page - 1) * limit };
   }
@@ -987,6 +1268,49 @@ export class MultiPackService {
   private optionalString(value: unknown, field: string) {
     if (value === undefined || value === null || value === '') return null;
     return this.requiredString(value, field);
+  }
+
+  private optionalStringArray(value: unknown, field: string) {
+    if (value === undefined || value === null) return null;
+
+    if (!Array.isArray(value)) {
+      throw new BadRequestException(`${field} must be a list of IDs`);
+    }
+
+    const values = value.map((entry) => this.requiredString(entry, field));
+    const uniqueValues = [...new Set(values)];
+
+    if (uniqueValues.length !== values.length) {
+      throw new BadRequestException(`${field} cannot contain duplicate IDs`);
+    }
+
+    return uniqueValues;
+  }
+
+  private toFriendlyBulkIssue(error: unknown) {
+    if (
+      error instanceof BadRequestException ||
+      error instanceof ConflictException ||
+      error instanceof ForbiddenException ||
+      error instanceof NotFoundException
+    ) {
+      const response = error.getResponse();
+
+      if (typeof response === 'string') return response;
+      if (
+        typeof response === 'object' &&
+        response !== null &&
+        'message' in response
+      ) {
+        const message = (response as { message?: unknown }).message;
+        if (typeof message === 'string') return message;
+        if (Array.isArray(message) && typeof message[0] === 'string') {
+          return message[0];
+        }
+      }
+    }
+
+    return 'This request could not be validated. Edit it and try again.';
   }
 
   private isPositiveIntegerText(value: string) {

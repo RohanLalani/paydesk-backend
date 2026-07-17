@@ -89,6 +89,126 @@ describe('ProductService permissions', () => {
   });
 });
 
+describe('ProductService price book list', () => {
+  let service: ProductService;
+  let prisma: {
+    product: { findMany: jest.Mock; count: jest.Mock };
+  };
+  let access: { ensureStoreAccess: jest.Mock };
+
+  const user = {
+    accountId: 'manager-1',
+    staffId: 'staff-manager-1',
+    role: StaffRole.manager,
+    type: StaffRole.manager,
+  };
+
+  beforeEach(() => {
+    prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([priceBookProductFixture()]),
+        count: jest.fn().mockResolvedValue(1),
+      },
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new ProductService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  it('returns selected-store products with numeric product number sorting by default', async () => {
+    const result = await service.listStoreProducts('store-1', {}, user);
+
+    expect(access.ensureStoreAccess).toHaveBeenCalledWith(
+      'store-1',
+      user,
+      'manage_products',
+    );
+    expect(prisma.product.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { storeId: 'store-1' },
+        orderBy: [{ productNumber: 'asc' }, { id: 'asc' }],
+        skip: 0,
+        take: 50,
+      }),
+    );
+    expect(result).toMatchObject({
+      total: 1,
+      page: 1,
+      limit: 50,
+      totalPages: 1,
+      items: [{ productNumber: 2, barcode: '001234567890' }],
+    });
+  });
+
+  it('caps page size and maps filters/search to the product query', async () => {
+    await service.listStoreProducts(
+      'store-1',
+      {
+        search: '12',
+        departmentId: 'department-1',
+        categoryId: 'category-1',
+        priceGroupId: '__none__',
+        isActive: 'true',
+        trackInventory: 'false',
+        marginStatus: 'negative',
+        sort: 'margin',
+        order: 'desc',
+        page: '2',
+        limit: '500',
+      },
+      user,
+    );
+
+    const findManyCalls = prisma.product.findMany.mock.calls as Array<
+      [
+        {
+          where: {
+            storeId: string;
+            departmentId: string;
+            productCategoryId: string;
+            priceGroupId: null;
+            isActive: boolean;
+            trackInventory: boolean;
+            margin: { lt: number };
+            OR: Array<Record<string, unknown>>;
+          };
+          orderBy: Array<Record<string, unknown>>;
+          skip: number;
+          take: number;
+        },
+      ]
+    >;
+    const [findManyArg] = findManyCalls[0];
+
+    expect(findManyArg).toBeDefined();
+    expect(findManyArg.where.storeId).toBe('store-1');
+    expect(findManyArg.where.departmentId).toBe('department-1');
+    expect(findManyArg.where.productCategoryId).toBe('category-1');
+    expect(findManyArg.where.priceGroupId).toBeNull();
+    expect(findManyArg.where.isActive).toBe(true);
+    expect(findManyArg.where.trackInventory).toBe(false);
+    expect(findManyArg.where.margin).toEqual({ lt: 0 });
+    expect(findManyArg.where.OR).toEqual(
+      expect.arrayContaining([
+        { productNumber: 12 },
+        { barcode: '12' },
+        { name: { contains: '12', mode: 'insensitive' } },
+      ]),
+    );
+    expect(findManyArg.orderBy).toEqual([
+      { margin: 'desc' },
+      { productNumber: 'asc' },
+      { id: 'asc' },
+    ]);
+    expect(findManyArg.skip).toBe(100);
+    expect(findManyArg.take).toBe(100);
+  });
+});
+
 describe('ProductService item editor APIs', () => {
   let service: ProductService;
   let prisma: {
@@ -579,6 +699,47 @@ function productFixture(overrides: Record<string, unknown> = {}) {
     barcode: '012345678905',
     name: 'Test Item',
     currentQuantity: 0,
+    ...overrides,
+  };
+}
+
+function priceBookProductFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'product-1',
+    productNumber: 2,
+    barcode: '001234567890',
+    name: 'Test Item',
+    saleType: ProductSaleType.piece,
+    unitRetail: 9.99,
+    onlineRetailPrice: null,
+    unitCost: 5,
+    unitCostAfterDiscountAndRebate: 4.8,
+    margin: 51.95,
+    defaultMargin: null,
+    unitsPerCase: 12,
+    caseCost: 60,
+    caseDiscount: 2,
+    caseRebate: 0.4,
+    currentQuantity: 20,
+    minInventory: 5,
+    maxInventory: 100,
+    trackInventory: true,
+    allowNegativeInventory: false,
+    unitOfMeasure: 'Each',
+    size: '16 oz',
+    minimumAge: null,
+    allowEbt: false,
+    isActive: true,
+    updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+    department: { id: 'department-1', name: 'Beverages' },
+    productCategory: { id: 'category-1', name: 'Energy Drinks' },
+    priceGroup: null,
+    tax: {
+      id: 'tax-1',
+      name: 'Sales Tax',
+      rate: 0.0825,
+      surchargeAmount: new Prisma.Decimal(0),
+    },
     ...overrides,
   };
 }
