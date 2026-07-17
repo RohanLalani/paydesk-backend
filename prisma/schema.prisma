@@ -737,12 +737,13 @@ model ProductCategory {
 }
 
 model Tax {
-  id        String   @id @default(uuid())
-  name      String
-  rate      Float
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id              String   @id @default(uuid())
+  name            String
+  rate            Float
+  surchargeAmount Decimal  @default(0.00) @db.Decimal(12, 2)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)

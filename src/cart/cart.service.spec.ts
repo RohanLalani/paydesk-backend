@@ -2,6 +2,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { CartStatus, Prisma, StaffRole, TaxStyle } from '@prisma/client';
 import { PosAccessService } from '../common/pos-access.service';
+import { TaxCalculationService } from '../common/tax-calculation.service';
 import { PrismaService } from '../prisma.service';
 import { CartService } from './cart.service';
 
@@ -32,6 +33,7 @@ describe('CartService race safety', () => {
     service = new CartService(
       prisma as unknown as PrismaService,
       access as unknown as PosAccessService,
+      new TaxCalculationService(),
     );
   });
 
@@ -378,6 +380,7 @@ function productFixture(overrides: Partial<TestProduct> = {}): TestProduct {
       id: 'tax-1',
       name: 'Sales Tax',
       rate: 0.0825,
+      surchargeAmount: new Prisma.Decimal(0),
       isActive: true,
       createdAt: new Date('2026-01-01T00:00:00.000Z'),
       updatedAt: new Date('2026-01-01T00:00:00.000Z'),

@@ -10,6 +10,7 @@ import {
   TransactionStatus,
 } from '@prisma/client';
 import { PosAccessService } from '../common/pos-access.service';
+import { TaxCalculationService } from '../common/tax-calculation.service';
 import { PrismaService } from '../prisma.service';
 import { RegistersService } from '../registers/registers.service';
 import { TransactionService } from './transaction.service';
@@ -44,6 +45,7 @@ describe('TransactionService checkout', () => {
       prisma as unknown as PrismaService,
       access as unknown as PosAccessService,
       registers as unknown as RegistersService,
+      new TaxCalculationService(),
     );
   });
 
@@ -177,7 +179,7 @@ function createState(): TestState {
     allowEbt: true,
     taxStyle: TaxStyle.post_discount,
     isActive: true,
-    tax: { rate: 0.1 },
+    tax: { rate: 0.1, surchargeAmount: new Prisma.Decimal(0) },
   };
   const customer = {
     id: 'customer-1',

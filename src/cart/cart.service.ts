@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
+import { TaxCalculationService } from '../common/tax-calculation.service';
 import { PrismaService } from '../prisma.service';
 
 @Injectable()
@@ -20,6 +21,7 @@ export class CartService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    private readonly taxCalculation: TaxCalculationService,
   ) {}
 
   async start(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -415,8 +417,9 @@ export class CartService {
               calculation.lineSubtotal.minus(calculation.loyaltyDiscount),
               0,
             );
-      const tax = this.roundMoney(
-        taxableAmount.mul(calculation.item.product.tax?.rate ?? 0),
+      const tax = this.taxCalculation.calculateLineTax(
+        taxableAmount,
+        calculation.item.product.tax,
       );
       const lineTotal = this.roundMoney(
         Prisma.Decimal.max(

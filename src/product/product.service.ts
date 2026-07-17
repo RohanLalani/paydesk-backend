@@ -783,15 +783,30 @@ export class ProductService {
   }
 
   async createTax(body: Record<string, unknown>, user: AuthTokenPayload) {
-    const dto = {
-      storeId: this.requiredString(body.storeId, 'storeId'),
-      name: this.requiredString(body.name, 'name'),
-      rate: this.requiredNumber(body.rate, 'rate'),
-    };
-    await this.access.ensureStoreAccess(dto.storeId, user, 'manage_products');
+    const { storeId, ...taxBody } = body;
+    return this.createStoreTax(
+      this.requiredString(storeId, 'storeId'),
+      taxBody,
+      user,
+      { rateInput: 'fraction', response: 'legacy' },
+    );
+  }
+
+  async createStoreTax(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+    options: TaxOperationOptions = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const dto = this.parseCreateTaxBody(body, options.rateInput ?? 'percent');
+    await this.ensureTaxNameAvailable(storeId, dto.name);
 
     try {
-      return await this.prisma.tax.create({ data: dto });
+      const tax = await this.prisma.tax.create({ data: { storeId, ...dto } });
+      return options.response === 'legacy'
+        ? this.serializeTaxReference(tax)
+        : this.serializeTax(tax);
     } catch (error) {
       this.handleSetupNameConflict(error, 'tax');
       throw error;
@@ -801,10 +816,76 @@ export class ProductService {
   async listTaxes(storeId: string, user: AuthTokenPayload) {
     await this.access.ensureStoreAccess(storeId, user, 'manage_products');
 
-    return this.prisma.tax.findMany({
+    const taxes = await this.prisma.tax.findMany({
       where: { storeId, isActive: true },
       orderBy: { name: 'asc' },
     });
+
+    return taxes.map((tax) => this.serializeTaxReference(tax));
+  }
+
+  async listStoreTaxes(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const active = this.optionalQueryBoolean(query.active, 'active');
+    const search = this.optionalSearch(query.search, 'search');
+    const sort = this.optionalSort(
+      query.sort,
+      ['name', 'rate', 'surchargeAmount', 'createdAt', 'updatedAt'],
+      'name',
+      'sort',
+    );
+    const order = this.optionalSort(
+      query.order,
+      ['asc', 'desc'],
+      'asc',
+      'order',
+    );
+    const pagination = this.parsePageLimit(query);
+    const where: Prisma.TaxWhereInput = {
+      storeId,
+      ...(active === undefined ? {} : { isActive: active }),
+      ...(search ? { name: { contains: search, mode: 'insensitive' } } : {}),
+    };
+    const orderBy =
+      sort === 'name' && order === 'asc'
+        ? [{ isActive: 'desc' as const }, { name: 'asc' as const }]
+        : [{ [sort]: order }, { name: 'asc' as const }];
+
+    const [taxes, total] = await Promise.all([
+      this.prisma.tax.findMany({
+        where,
+        orderBy,
+        skip: pagination.skip,
+        take: pagination.limit,
+        include: { _count: { select: { departments: true } } },
+      }),
+      this.prisma.tax.count({ where }),
+    ]);
+
+    return {
+      items: taxes.map((tax) => this.serializeTax(tax)),
+      total,
+      page: pagination.page,
+      limit: pagination.limit,
+    };
+  }
+
+  async getStoreTax(storeId: string, taxId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const tax = await this.prisma.tax.findFirst({
+      where: { id: taxId, storeId },
+      include: { _count: { select: { departments: true } } },
+    });
+
+    if (!tax) {
+      throw new NotFoundException('Tax not found');
+    }
+
+    return this.serializeTax(tax);
   }
 
   async updateTax(
@@ -813,19 +894,44 @@ export class ProductService {
     user: AuthTokenPayload,
   ) {
     const tax = await this.findTaxOrThrow(id);
-    await this.access.ensureStoreAccess(tax.storeId, user, 'manage_products');
-    const data: Prisma.TaxUpdateInput = {};
+    return this.updateStoreTax(tax.storeId, id, body, user, {
+      rateInput: 'fraction',
+      response: 'legacy',
+    });
+  }
 
-    if (body.name !== undefined) {
-      data.name = this.requiredString(body.name, 'name');
+  async updateStoreTax(
+    storeId: string,
+    taxId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+    options: TaxOperationOptions = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const tax = await this.prisma.tax.findFirst({
+      where: { id: taxId, storeId },
+      include: { _count: { select: { departments: true } } },
+    });
+
+    if (!tax) {
+      throw new NotFoundException('Tax not found');
     }
 
-    if (body.rate !== undefined) {
-      data.rate = this.requiredNumber(body.rate, 'rate');
+    const data = this.parseUpdateTaxBody(body, options.rateInput ?? 'percent');
+
+    if (data.name !== undefined) {
+      await this.ensureTaxNameAvailable(storeId, data.name, tax.id);
     }
 
     try {
-      return await this.prisma.tax.update({ where: { id }, data });
+      const updated = await this.prisma.tax.update({
+        where: { id: tax.id },
+        data,
+        include: { _count: { select: { departments: true } } },
+      });
+      return options.response === 'legacy'
+        ? this.serializeTaxReference(updated)
+        : this.serializeTax(updated);
     } catch (error) {
       this.handleSetupNameConflict(error, 'tax');
       throw error;
@@ -2171,6 +2277,137 @@ export class ProductService {
     return normalized;
   }
 
+  private parseCreateTaxBody(
+    body: Record<string, unknown>,
+    rateInput: TaxRateInput,
+  ): TaxCreateData {
+    this.ensureAllowedFields(body, this.taxFields);
+
+    return {
+      name: this.normalizeTaxName(body.name),
+      rate: this.requiredTaxRate(body.rate, rateInput),
+      surchargeAmount:
+        this.optionalTaxSurcharge(body.surchargeAmount) ??
+        new Prisma.Decimal(0),
+      isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
+    };
+  }
+
+  private parseUpdateTaxBody(
+    body: Record<string, unknown>,
+    rateInput: TaxRateInput,
+  ): TaxUpdateData {
+    this.ensureAllowedFields(body, this.taxFields);
+    const data: TaxUpdateData = {};
+
+    if (body.name !== undefined) {
+      data.name = this.normalizeTaxName(body.name);
+    }
+
+    if (body.rate !== undefined) {
+      data.rate = this.requiredTaxRate(body.rate, rateInput);
+    }
+
+    if (body.surchargeAmount !== undefined) {
+      data.surchargeAmount =
+        this.optionalTaxSurcharge(body.surchargeAmount) ??
+        new Prisma.Decimal(0);
+    }
+
+    if (body.isActive !== undefined) {
+      data.isActive = this.requiredBoolean(body.isActive, 'isActive');
+    }
+
+    return data;
+  }
+
+  private normalizeTaxName(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('name is required');
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      throw new BadRequestException('name is required');
+    }
+
+    if (normalized.length > 100) {
+      throw new BadRequestException('name must be 100 characters or fewer');
+    }
+
+    if (
+      [...normalized].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      throw new BadRequestException('name contains unsupported characters');
+    }
+
+    return normalized;
+  }
+
+  private requiredTaxRate(value: unknown, rateInput: TaxRateInput) {
+    const maxScale = rateInput === 'percent' ? 4 : 6;
+    const parsed = this.requiredDecimal(value, 'rate', maxScale);
+    const max = rateInput === 'percent' ? 100 : 1;
+
+    if (parsed < 0 || parsed > max) {
+      throw new BadRequestException(
+        rateInput === 'percent'
+          ? 'rate must be between 0 and 100'
+          : 'rate must be between 0 and 1',
+      );
+    }
+
+    const fraction = rateInput === 'percent' ? parsed / 100 : parsed;
+    return Number(fraction.toFixed(6));
+  }
+
+  private optionalTaxSurcharge(value: unknown) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    const parsed = this.requiredDecimal(value, 'surchargeAmount', 2);
+
+    if (parsed < 0) {
+      throw new BadRequestException('surchargeAmount must be zero or greater');
+    }
+
+    if (parsed > 9999999999.99) {
+      throw new BadRequestException('surchargeAmount is too large');
+    }
+
+    return new Prisma.Decimal(parsed);
+  }
+
+  private async ensureTaxNameAvailable(
+    storeId: string,
+    name: string,
+    ignoreId?: string,
+  ) {
+    const normalized = name.toLocaleLowerCase();
+    const taxes = await this.prisma.tax.findMany({
+      where: {
+        storeId,
+        ...(ignoreId ? { id: { not: ignoreId } } : {}),
+      },
+      select: { name: true },
+    });
+    const duplicate = taxes.some(
+      (tax) =>
+        tax.name.trim().replace(/\s+/g, ' ').toLocaleLowerCase() === normalized,
+    );
+
+    if (duplicate) {
+      throw new ConflictException(
+        'A tax with this name already exists in this store.',
+      );
+    }
+  }
+
   private requiredCurrency(value: unknown, field: string) {
     const parsed = this.requiredDecimal(value, field, 2);
 
@@ -2854,6 +3091,7 @@ export class ProductService {
             storeId: department.defaultTax.storeId,
             name: department.defaultTax.name,
             rate: department.defaultTax.rate,
+            surchargeAmount: department.defaultTax.surchargeAmount.toFixed(2),
             isActive: department.defaultTax.isActive,
           }
         : null,
@@ -2881,6 +3119,39 @@ export class ProductService {
       updatedAt: department.updatedAt,
       productCount: department._count.products,
     };
+  }
+
+  private serializeTaxReference(tax: TaxRecord) {
+    return {
+      id: tax.id,
+      storeId: tax.storeId,
+      name: tax.name,
+      rate: tax.rate,
+      surchargeAmount: tax.surchargeAmount.toFixed(2),
+      isActive: tax.isActive,
+    };
+  }
+
+  private serializeTax(tax: TaxRecord & { _count?: { departments: number } }) {
+    return {
+      id: tax.id,
+      storeId: tax.storeId,
+      name: tax.name,
+      rate: this.percentString(tax.rate),
+      surchargeAmount: tax.surchargeAmount.toFixed(2),
+      isActive: tax.isActive,
+      departmentCount: tax._count?.departments ?? 0,
+      createdAt: tax.createdAt,
+      updatedAt: tax.updatedAt,
+    };
+  }
+
+  private percentString(rate: number) {
+    return new Prisma.Decimal(rate)
+      .mul(100)
+      .toFixed(4)
+      .replace(/0+$/, '')
+      .replace(/\.$/, '');
   }
 
   private serializePriceGroup(
@@ -2956,6 +3227,8 @@ export class ProductService {
     'defaultUnitRetail',
     'isActive',
   ];
+
+  private readonly taxFields = ['name', 'rate', 'surchargeAmount', 'isActive'];
 
   private readonly productInclude = {
     department: true,
@@ -3035,6 +3308,24 @@ type PriceGroupUpdateData = {
   defaultUnitRetail?: Prisma.Decimal;
   isActive?: boolean;
 };
+
+type TaxRateInput = 'percent' | 'fraction';
+
+type TaxOperationOptions = {
+  rateInput?: TaxRateInput;
+  response?: 'store' | 'legacy';
+};
+
+type TaxCreateData = {
+  name: string;
+  rate: number;
+  surchargeAmount: Prisma.Decimal;
+  isActive: boolean;
+};
+
+type TaxUpdateData = Partial<TaxCreateData>;
+
+type TaxRecord = Prisma.TaxGetPayload<Record<string, never>>;
 
 type InventoryReceiveDto = {
   storeId: string;

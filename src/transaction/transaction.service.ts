@@ -15,6 +15,7 @@ import {
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
+import { TaxCalculationService } from '../common/tax-calculation.service';
 import { PrismaService } from '../prisma.service';
 import { RegistersService } from '../registers/registers.service';
 
@@ -24,6 +25,7 @@ export class TransactionService {
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
     private readonly registers: RegistersService,
+    private readonly taxCalculation: TaxCalculationService,
   ) {}
 
   async validateCart(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -388,7 +390,10 @@ export class TransactionService {
         product.taxStyle === TaxStyle.pre_discount
           ? lineSubtotal
           : lineSubtotal.minus(discountAmount);
-      const taxAmount = this.roundMoney(taxableAmount.mul(product.tax.rate));
+      const taxAmount = this.taxCalculation.calculateLineTax(
+        taxableAmount,
+        product.tax,
+      );
       const lineTotal = this.roundMoney(
         lineSubtotal.minus(discountAmount).plus(taxAmount),
       );
@@ -515,8 +520,9 @@ export class TransactionService {
               calculation.lineSubtotal.minus(calculation.loyaltyDiscount),
               0,
             );
-      const taxAmount = this.roundMoney(
-        taxableAmount.mul(lockedProduct.tax.rate),
+      const taxAmount = this.taxCalculation.calculateLineTax(
+        taxableAmount,
+        lockedProduct.tax,
       );
       const discountAmount = this.roundMoney(
         calculation.itemDiscount.plus(calculation.loyaltyDiscount),
