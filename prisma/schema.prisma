@@ -734,6 +734,8 @@ model Product {
   @@unique([storeId, barcode])
   @@unique([storeId, productNumber])
   @@index([storeId, isActive])
+  @@index([storeId, trackInventory])
+  @@index([storeId, currentQuantity])
   @@index([storeId, productNumber])
   @@index([storeId, isActive, productNumber])
   @@index([storeId, departmentId, productNumber])
@@ -877,6 +879,7 @@ model InventoryLog {
   staff              Staff  @relation(fields: [performedByStaffId], references: [id])
 
   @@index([storeId, createdAt])
+  @@index([storeId, productId, createdAt])
   @@index([productId, createdAt])
   @@index([performedByStaffId])
   @@index([actionType])
@@ -1117,6 +1120,7 @@ model Transaction {
   receipt Receipt?
 
   @@index([storeId, createdAt])
+  @@index([storeId, transactionStatus, createdAt])
   @@index([registerId])
   @@index([storeId, registerId, createdAt])
   @@index([staffId, createdAt])
@@ -1143,6 +1147,7 @@ model TransactionItem {
 
   @@index([transactionId])
   @@index([productId])
+  @@index([productId, transactionId])
 }
 
 model Receipt {

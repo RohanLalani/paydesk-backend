@@ -40,6 +40,19 @@ export class StoreProductsController {
     return this.productService.listStoreProducts(storeId, query, request.user);
   }
 
+  @Get('inventory/overview')
+  listInventoryOverview(
+    @Param('storeId') storeId: string,
+    @Query() query: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.listInventoryOverview(
+      storeId,
+      query,
+      request.user,
+    );
+  }
+
   @Get('products/product-number/:productNumber')
   findByProductNumber(
     @Param('storeId') storeId: string,
@@ -49,6 +62,19 @@ export class StoreProductsController {
     return this.productService.findByProductNumber(
       storeId,
       productNumber,
+      request.user,
+    );
+  }
+
+  @Get('products/:productId')
+  findStoreProductById(
+    @Param('storeId') storeId: string,
+    @Param('productId') productId: string,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.productService.findStoreProductById(
+      storeId,
+      productId,
       request.user,
     );
   }

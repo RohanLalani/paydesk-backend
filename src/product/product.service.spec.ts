@@ -209,6 +209,181 @@ describe('ProductService price book list', () => {
   });
 });
 
+describe('ProductService inventory overview', () => {
+  let service: ProductService;
+  let prisma: {
+    product: { findMany: jest.Mock };
+    transactionItem: { groupBy: jest.Mock };
+  };
+  let access: { ensureStoreAccess: jest.Mock };
+
+  const user = {
+    accountId: 'manager-1',
+    staffId: 'staff-manager-1',
+    role: StaffRole.manager,
+    type: StaffRole.manager,
+  };
+
+  beforeEach(() => {
+    prisma = {
+      product: {
+        findMany: jest.fn().mockResolvedValue([
+          inventoryOverviewProductFixture(),
+          inventoryOverviewProductFixture({
+            id: 'product-2',
+            productNumber: 9,
+            barcode: '000222222222',
+            name: 'Slow Item',
+            currentQuantity: 0,
+            unitCostAfterDiscountAndRebate: null,
+            unitCost: null,
+            caseCost: 12,
+            unitsPerCase: 6,
+            minInventory: 4,
+          }),
+          inventoryOverviewProductFixture({
+            id: 'product-3',
+            productNumber: 12,
+            barcode: '000333333333',
+            name: 'Dead Item',
+            currentQuantity: 7,
+            createdAt: new Date('2026-01-01T00:00:00.000Z'),
+            minInventory: 3,
+          }),
+        ]),
+      },
+      transactionItem: {
+        groupBy: jest
+          .fn()
+          .mockResolvedValueOnce([
+            {
+              productId: 'product-1',
+              _sum: {
+                quantity: 8,
+                lineSubtotal: new Prisma.Decimal('39.92'),
+              },
+              _max: { createdAt: new Date('2026-07-16T10:00:00.000Z') },
+            },
+          ])
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([
+            {
+              productId: 'product-3',
+              _max: { createdAt: new Date('2026-02-01T00:00:00.000Z') },
+            },
+          ]),
+      },
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new ProductService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  it('defaults to the 30 day range and falls back to view_store access', async () => {
+    access.ensureStoreAccess
+      .mockRejectedValueOnce(new ForbiddenException('no report access'))
+      .mockResolvedValueOnce(undefined);
+
+    const overview = await service.listInventoryOverview('store-1', {}, user);
+
+    expect(access.ensureStoreAccess).toHaveBeenNthCalledWith(
+      1,
+      'store-1',
+      user,
+      'view_reports',
+    );
+    expect(access.ensureStoreAccess).toHaveBeenNthCalledWith(
+      2,
+      'store-1',
+      user,
+      'view_store',
+    );
+    expect(overview.range).toBe('30d');
+  });
+
+  it('builds summary counts, top sellers, slow sellers, low stock, and dead stock from existing models', async () => {
+    const overview = await service.listInventoryOverview(
+      'store-1',
+      { range: '7d' },
+      user,
+    );
+
+    expect(overview.summary).toEqual({
+      activeProductCount: 3,
+      lowStockCount: 1,
+      outOfStockCount: 1,
+      inventoryValue: '38.00',
+      missingCostCount: 0,
+    });
+    expect(overview.topSellers[0]).toMatchObject({
+      productId: 'product-1',
+      unitsSold: 8,
+      grossSales: '39.92',
+    });
+    expect(overview.slowSellers[0]).toMatchObject({
+      productId: 'product-3',
+      unitsSold: 0,
+      lastSaleAt: null,
+    });
+    expect(overview.deadStock[0]).toMatchObject({
+      productId: 'product-3',
+      lastSaleAt: '2026-02-01T00:00:00.000Z',
+    });
+    expect(overview.deadStock[0]?.daysSinceLastSale).toEqual(
+      expect.any(Number),
+    );
+    expect(overview.lowStock[0]).toMatchObject({
+      productId: 'product-2',
+      shortage: 4,
+      status: 'OUT_OF_STOCK',
+    });
+  });
+
+  it('uses transaction item snapshot pricing and exposes negative stock alerts', async () => {
+    prisma.product.findMany.mockResolvedValueOnce([
+      inventoryOverviewProductFixture({
+        id: 'product-4',
+        productNumber: 21,
+        name: 'Negative Item',
+        currentQuantity: -2,
+        minInventory: 1,
+        unitCostAfterDiscountAndRebate: null,
+        unitCost: null,
+        caseCost: null,
+        unitsPerCase: null,
+      }),
+    ]);
+    prisma.transactionItem.groupBy
+      .mockReset()
+      .mockResolvedValueOnce([
+        {
+          productId: 'product-4',
+          _sum: {
+            quantity: 3,
+            lineSubtotal: new Prisma.Decimal('18.75'),
+          },
+          _max: { createdAt: new Date('2026-07-15T12:00:00.000Z') },
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    const overview = await service.listInventoryOverview('store-1', {}, user);
+
+    expect(overview.summary.inventoryValue).toBe('0.00');
+    expect(overview.summary.missingCostCount).toBe(0);
+    expect(overview.topSellers[0]?.grossSales).toBe('18.75');
+    expect(overview.alerts[0]).toMatchObject({
+      productId: 'product-4',
+      type: 'NEGATIVE_STOCK',
+    });
+  });
+});
+
 describe('ProductService item editor APIs', () => {
   let service: ProductService;
   let prisma: {
@@ -740,6 +915,29 @@ function priceBookProductFixture(overrides: Record<string, unknown> = {}) {
       rate: 0.0825,
       surchargeAmount: new Prisma.Decimal(0),
     },
+    ...overrides,
+  };
+}
+
+function inventoryOverviewProductFixture(
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id: 'product-1',
+    productNumber: 7,
+    barcode: '000111111111',
+    name: 'Fast Item',
+    currentQuantity: 12,
+    unitsPerCase: 12,
+    caseCost: 24,
+    unitCost: 2,
+    unitCostAfterDiscountAndRebate: 2,
+    unitRetail: 4.99,
+    minInventory: 5,
+    trackInventory: true,
+    isActive: true,
+    createdAt: new Date('2026-05-01T00:00:00.000Z'),
+    department: { id: 'department-1', name: 'Beverages' },
     ...overrides,
   };
 }

@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  ForbiddenException,
 } from '@nestjs/common';
 import {
   AuditAction,
@@ -12,9 +13,12 @@ import {
   DepartmentMinimumAge,
   DepartmentType,
   InventoryActionType,
+  PaymentStatus,
   Prisma,
   ProductSaleType,
+  StorePermissionKey,
   TaxStyle,
+  TransactionStatus,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
@@ -42,6 +46,13 @@ const PRICE_BOOK_SORT_FIELDS = [
 
 type PriceBookSortField = (typeof PRICE_BOOK_SORT_FIELDS)[number];
 type MarginStatus = 'positive' | 'zero' | 'negative' | 'unavailable';
+type InventoryOverviewRange = '7d' | '30d' | '90d';
+
+const INVENTORY_OVERVIEW_RANGES = ['7d', '30d', '90d'] as const;
+const DEFAULT_INVENTORY_OVERVIEW_RANGE: InventoryOverviewRange = '30d';
+const INVENTORY_OVERVIEW_LIMIT = 10;
+const DEAD_STOCK_LOOKBACK_DAYS = 90;
+const DEAD_STOCK_AGE_GRACE_DAYS = 30;
 
 @Injectable()
 export class ProductService {
@@ -1502,6 +1513,328 @@ export class ProductService {
     };
   }
 
+  async listInventoryOverview(
+    storeId: string,
+    query: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.ensureInventoryOverviewAccess(storeId, user);
+    const range = this.normalizeInventoryOverviewRange(query.range);
+    const generatedAt = new Date();
+    const salesWindow = this.getTrailingWindow(
+      generatedAt,
+      this.rangeToDays(range),
+    );
+    const deadStockWindow = this.getTrailingWindow(
+      generatedAt,
+      DEAD_STOCK_LOOKBACK_DAYS,
+    );
+    const deadStockGraceCutoff = this.addDays(
+      this.startOfDay(generatedAt),
+      -DEAD_STOCK_AGE_GRACE_DAYS,
+    );
+
+    const [activeProducts, salesInRange] = await Promise.all([
+      this.prisma.product.findMany({
+        where: {
+          storeId,
+          isActive: true,
+        },
+        select: this.inventoryOverviewProductSelect,
+        orderBy: [{ productNumber: 'asc' }, { name: 'asc' }],
+      }),
+      this.prisma.transactionItem.groupBy({
+        by: ['productId'],
+        where: {
+          transaction: this.completedPaidTransactionWhere(storeId, salesWindow),
+        },
+        _sum: {
+          quantity: true,
+          lineSubtotal: true,
+        },
+        _max: {
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const trackedProducts = activeProducts.filter(
+      (product) => product.trackInventory,
+    );
+    const activeProductMap = new Map(
+      activeProducts.map((product) => [product.id, product] as const),
+    );
+    const salesByProductId = new Map(
+      salesInRange.map((sale) => [
+        sale.productId,
+        {
+          unitsSold: sale._sum.quantity ?? 0,
+          grossSales: this.decimalOrZero(sale._sum.lineSubtotal),
+          lastSaleAt: sale._max.createdAt,
+        },
+      ]),
+    );
+
+    const deadStockCandidates = trackedProducts.filter(
+      (product) =>
+        product.currentQuantity > 0 &&
+        product.createdAt <= deadStockGraceCutoff,
+    );
+    const deadStockCandidateIds = deadStockCandidates.map(
+      (product) => product.id,
+    );
+
+    const [recentDeadStockSales, allTimeDeadStockSales] =
+      deadStockCandidateIds.length > 0
+        ? await Promise.all([
+            this.prisma.transactionItem.groupBy({
+              by: ['productId'],
+              where: {
+                productId: { in: deadStockCandidateIds },
+                transaction: this.completedPaidTransactionWhere(
+                  storeId,
+                  deadStockWindow,
+                ),
+              },
+              _sum: { quantity: true },
+            }),
+            this.prisma.transactionItem.groupBy({
+              by: ['productId'],
+              where: {
+                productId: { in: deadStockCandidateIds },
+                transaction: {
+                  storeId,
+                  transactionStatus: TransactionStatus.completed,
+                  paymentStatus: PaymentStatus.paid,
+                },
+              },
+              _max: { createdAt: true },
+            }),
+          ])
+        : [[], []];
+
+    const recentDeadStockSalesSet = new Set(
+      recentDeadStockSales.map((sale) => sale.productId),
+    );
+    const allTimeDeadStockSalesMap = new Map(
+      allTimeDeadStockSales.map((sale) => [
+        sale.productId,
+        sale._max.createdAt,
+      ]),
+    );
+
+    const inventoryValue = trackedProducts.reduce((total, product) => {
+      if (product.currentQuantity <= 0) {
+        return total;
+      }
+
+      const cost = this.getAuthoritativeUnitCost(product);
+      if (!cost) {
+        return total;
+      }
+
+      return total.add(cost.mul(product.currentQuantity));
+    }, new Prisma.Decimal(0));
+
+    const missingCostCount = trackedProducts.filter(
+      (product) =>
+        product.currentQuantity > 0 && !this.getAuthoritativeUnitCost(product),
+    ).length;
+
+    const lowStockProducts = trackedProducts
+      .filter(
+        (product) =>
+          typeof product.minInventory === 'number' &&
+          product.currentQuantity <= product.minInventory,
+      )
+      .sort((left, right) => {
+        const leftShortage = (left.minInventory ?? 0) - left.currentQuantity;
+        const rightShortage = (right.minInventory ?? 0) - right.currentQuantity;
+        return (
+          rightShortage - leftShortage ||
+          left.currentQuantity - right.currentQuantity ||
+          left.name.localeCompare(right.name)
+        );
+      });
+
+    const outOfStockProducts = trackedProducts.filter(
+      (product) => product.currentQuantity <= 0,
+    );
+
+    const alertCounts = {
+      outOfStock: outOfStockProducts.filter(
+        (product) => product.currentQuantity === 0,
+      ).length,
+      lowStock: lowStockProducts.filter(
+        (product) => product.currentQuantity > 0,
+      ).length,
+      negativeInventory: trackedProducts.filter(
+        (product) => product.currentQuantity < 0,
+      ).length,
+      missingCost: trackedProducts.filter(
+        (product) => !this.getAuthoritativeUnitCost(product),
+      ).length,
+      missingMinimumInventory: trackedProducts.filter(
+        (product) => product.minInventory === null,
+      ).length,
+    };
+
+    const alerts = trackedProducts
+      .flatMap((product) => this.buildInventoryAlerts(product))
+      .sort(
+        (left, right) =>
+          left.priority - right.priority ||
+          left.productName.localeCompare(right.productName),
+      )
+      .slice(0, INVENTORY_OVERVIEW_LIMIT)
+      .map((entry) => {
+        const { priority, ...alert } = entry;
+        void priority;
+        return alert;
+      });
+
+    const topSellers = salesInRange
+      .map((sale) => {
+        const product = activeProductMap.get(sale.productId);
+        if (!product) {
+          return null;
+        }
+
+        return {
+          productId: product.id,
+          productNumber: product.productNumber,
+          productName: product.name,
+          currentQuantity: product.currentQuantity,
+          unitsSold: sale._sum.quantity ?? 0,
+          grossSales: this.decimalOrZero(sale._sum.lineSubtotal),
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort(
+        (left, right) =>
+          right.unitsSold - left.unitsSold ||
+          right.grossSales.comparedTo(left.grossSales) ||
+          left.productName.localeCompare(right.productName),
+      )
+      .slice(0, INVENTORY_OVERVIEW_LIMIT)
+      .map((item, index) => ({
+        rank: index + 1,
+        productId: item.productId,
+        productNumber: item.productNumber,
+        productName: item.productName,
+        currentQuantity: item.currentQuantity,
+        unitsSold: item.unitsSold,
+        grossSales: item.grossSales.toFixed(2),
+      }));
+
+    const slowSellers = activeProducts
+      .map((product) => {
+        const sale = salesByProductId.get(product.id);
+        return {
+          productId: product.id,
+          productNumber: product.productNumber,
+          productName: product.name,
+          currentQuantity: product.currentQuantity,
+          unitRetail: this.numberToFixed(product.unitRetail),
+          unitsSold: sale?.unitsSold ?? 0,
+          lastSaleAt: sale?.lastSaleAt ?? null,
+        };
+      })
+      .sort((left, right) => {
+        if (left.unitsSold !== right.unitsSold) {
+          return left.unitsSold - right.unitsSold;
+        }
+
+        if (left.lastSaleAt && right.lastSaleAt) {
+          return (
+            left.lastSaleAt.getTime() - right.lastSaleAt.getTime() ||
+            left.productName.localeCompare(right.productName)
+          );
+        }
+
+        if (!left.lastSaleAt && right.lastSaleAt) {
+          return -1;
+        }
+
+        if (left.lastSaleAt && !right.lastSaleAt) {
+          return 1;
+        }
+
+        return left.productName.localeCompare(right.productName);
+      })
+      .slice(0, INVENTORY_OVERVIEW_LIMIT)
+      .map((product) => ({
+        ...product,
+        lastSaleAt: product.lastSaleAt?.toISOString() ?? null,
+      }));
+
+    const deadStock = deadStockCandidates
+      .filter((product) => !recentDeadStockSalesSet.has(product.id))
+      .map((product) => {
+        const lastSaleAt = allTimeDeadStockSalesMap.get(product.id) ?? null;
+        const referenceDate = lastSaleAt ?? product.createdAt;
+        return {
+          productId: product.id,
+          productNumber: product.productNumber,
+          productName: product.name,
+          currentQuantity: product.currentQuantity,
+          inventoryValue:
+            this.getAuthoritativeUnitCost(product)
+              ?.mul(product.currentQuantity)
+              .toFixed(2) ?? '0.00',
+          lastSaleAt: lastSaleAt?.toISOString() ?? null,
+          ageReferenceType: lastSaleAt ? 'last_sale' : 'created_at',
+          ageReferenceDate: referenceDate.toISOString(),
+          daysSinceLastSale: this.diffDays(generatedAt, referenceDate),
+        };
+      })
+      .sort(
+        (left, right) =>
+          right.daysSinceLastSale - left.daysSinceLastSale ||
+          Number(right.inventoryValue) - Number(left.inventoryValue) ||
+          left.productName.localeCompare(right.productName),
+      )
+      .slice(0, INVENTORY_OVERVIEW_LIMIT);
+
+    return {
+      generatedAt: generatedAt.toISOString(),
+      range,
+      summary: {
+        activeProductCount: activeProducts.length,
+        lowStockCount: lowStockProducts.length,
+        outOfStockCount: outOfStockProducts.length,
+        inventoryValue: inventoryValue.toFixed(2),
+        missingCostCount,
+      },
+      alertCounts,
+      alerts,
+      topSellers,
+      slowSellers,
+      deadStock,
+      lowStock: lowStockProducts
+        .slice(0, INVENTORY_OVERVIEW_LIMIT)
+        .map((product) => ({
+          productId: product.id,
+          productNumber: product.productNumber,
+          productName: product.name,
+          currentQuantity: product.currentQuantity,
+          minimumInventory: product.minInventory ?? 0,
+          shortage: (product.minInventory ?? 0) - product.currentQuantity,
+          departmentName: product.department?.name ?? null,
+          status:
+            product.currentQuantity < 0
+              ? 'NEGATIVE_STOCK'
+              : product.currentQuantity === 0
+                ? 'OUT_OF_STOCK'
+                : 'LOW_STOCK',
+        })),
+      rules: {
+        deadStockLookbackDays: DEAD_STOCK_LOOKBACK_DAYS,
+        deadStockAgeGraceDays: DEAD_STOCK_AGE_GRACE_DAYS,
+      },
+    };
+  }
+
   async findByBarcode(
     storeId: string,
     barcode: string,
@@ -1550,6 +1883,24 @@ export class ProductService {
     );
     const product = await this.prisma.product.findFirst({
       where: { storeId, productNumber, isActive: true },
+      include: this.productInclude,
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return product;
+  }
+
+  async findStoreProductById(
+    storeId: string,
+    productId: string,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, storeId },
       include: this.productInclude,
     });
 
@@ -2093,6 +2444,219 @@ export class ProductService {
       unitCostAfterDiscountAndRebate,
       margin,
     };
+  }
+
+  private async ensureInventoryOverviewAccess(
+    storeId: string,
+    user: AuthTokenPayload,
+  ) {
+    try {
+      await this.access.ensureStoreAccess(
+        storeId,
+        user,
+        StorePermissionKey.view_reports,
+      );
+    } catch (error) {
+      if (!(error instanceof ForbiddenException)) {
+        throw error;
+      }
+
+      await this.access.ensureStoreAccess(
+        storeId,
+        user,
+        StorePermissionKey.view_store,
+      );
+    }
+  }
+
+  private normalizeInventoryOverviewRange(
+    value: unknown,
+  ): InventoryOverviewRange {
+    if (
+      typeof value === 'string' &&
+      INVENTORY_OVERVIEW_RANGES.includes(value as InventoryOverviewRange)
+    ) {
+      return value as InventoryOverviewRange;
+    }
+
+    return DEFAULT_INVENTORY_OVERVIEW_RANGE;
+  }
+
+  private rangeToDays(range: InventoryOverviewRange) {
+    switch (range) {
+      case '7d':
+        return 7;
+      case '90d':
+        return 90;
+      default:
+        return 30;
+    }
+  }
+
+  private getTrailingWindow(now: Date, days: number) {
+    const end = new Date(now);
+    const start = this.startOfDay(this.addDays(now, -(days - 1)));
+    return { start, end };
+  }
+
+  private startOfDay(value: Date) {
+    const next = new Date(value);
+    next.setHours(0, 0, 0, 0);
+    return next;
+  }
+
+  private addDays(value: Date, days: number) {
+    const next = new Date(value);
+    next.setDate(next.getDate() + days);
+    return next;
+  }
+
+  private diffDays(later: Date, earlier: Date) {
+    return Math.max(
+      0,
+      Math.floor(
+        (this.startOfDay(later).getTime() -
+          this.startOfDay(earlier).getTime()) /
+          86400000,
+      ),
+    );
+  }
+
+  private completedPaidTransactionWhere(
+    storeId: string,
+    window: { start: Date; end: Date },
+  ): Prisma.TransactionWhereInput {
+    return {
+      storeId,
+      transactionStatus: TransactionStatus.completed,
+      paymentStatus: PaymentStatus.paid,
+      createdAt: {
+        gte: window.start,
+        lte: window.end,
+      },
+    };
+  }
+
+  private getAuthoritativeUnitCost(product: InventoryOverviewProductRecord) {
+    if (product.unitCostAfterDiscountAndRebate !== null) {
+      return new Prisma.Decimal(product.unitCostAfterDiscountAndRebate);
+    }
+
+    if (product.unitCost !== null) {
+      return new Prisma.Decimal(product.unitCost);
+    }
+
+    if (
+      product.caseCost !== null &&
+      product.unitsPerCase !== null &&
+      product.unitsPerCase > 0
+    ) {
+      return new Prisma.Decimal(product.caseCost).div(product.unitsPerCase);
+    }
+
+    return null;
+  }
+
+  private buildInventoryAlerts(product: InventoryOverviewProductRecord) {
+    const alerts: Array<{
+      priority: number;
+      productId: string;
+      productNumber: number;
+      productName: string;
+      barcode: string;
+      currentQuantity: number;
+      minimumInventory: number | null;
+      departmentName: string | null;
+      type:
+        | 'OUT_OF_STOCK'
+        | 'LOW_STOCK'
+        | 'NEGATIVE_STOCK'
+        | 'MISSING_COST'
+        | 'MISSING_MINIMUM_INVENTORY';
+    }> = [];
+
+    if (product.currentQuantity < 0) {
+      alerts.push({
+        priority: 0,
+        productId: product.id,
+        productNumber: product.productNumber,
+        productName: product.name,
+        barcode: product.barcode,
+        currentQuantity: product.currentQuantity,
+        minimumInventory: product.minInventory,
+        departmentName: product.department?.name ?? null,
+        type: 'NEGATIVE_STOCK',
+      });
+    } else if (product.currentQuantity === 0) {
+      alerts.push({
+        priority: 1,
+        productId: product.id,
+        productNumber: product.productNumber,
+        productName: product.name,
+        barcode: product.barcode,
+        currentQuantity: product.currentQuantity,
+        minimumInventory: product.minInventory,
+        departmentName: product.department?.name ?? null,
+        type: 'OUT_OF_STOCK',
+      });
+    } else if (
+      product.minInventory !== null &&
+      product.currentQuantity <= product.minInventory
+    ) {
+      alerts.push({
+        priority: 2,
+        productId: product.id,
+        productNumber: product.productNumber,
+        productName: product.name,
+        barcode: product.barcode,
+        currentQuantity: product.currentQuantity,
+        minimumInventory: product.minInventory,
+        departmentName: product.department?.name ?? null,
+        type: 'LOW_STOCK',
+      });
+    }
+
+    if (!this.getAuthoritativeUnitCost(product)) {
+      alerts.push({
+        priority: 3,
+        productId: product.id,
+        productNumber: product.productNumber,
+        productName: product.name,
+        barcode: product.barcode,
+        currentQuantity: product.currentQuantity,
+        minimumInventory: product.minInventory,
+        departmentName: product.department?.name ?? null,
+        type: 'MISSING_COST',
+      });
+    }
+
+    if (product.minInventory === null) {
+      alerts.push({
+        priority: 4,
+        productId: product.id,
+        productNumber: product.productNumber,
+        productName: product.name,
+        barcode: product.barcode,
+        currentQuantity: product.currentQuantity,
+        minimumInventory: product.minInventory,
+        departmentName: product.department?.name ?? null,
+        type: 'MISSING_MINIMUM_INVENTORY',
+      });
+    }
+
+    return alerts;
+  }
+
+  private decimalOrZero(value: Prisma.Decimal | number | null | undefined) {
+    if (value === null || value === undefined) {
+      return new Prisma.Decimal(0);
+    }
+
+    return value instanceof Prisma.Decimal ? value : new Prisma.Decimal(value);
+  }
+
+  private numberToFixed(value: number) {
+    return new Prisma.Decimal(value).toFixed(2);
   }
 
   private parseReceiveInventoryBody(
@@ -3838,6 +4402,24 @@ export class ProductService {
     },
   } satisfies Prisma.ProductSelect;
 
+  private readonly inventoryOverviewProductSelect = {
+    id: true,
+    productNumber: true,
+    barcode: true,
+    name: true,
+    currentQuantity: true,
+    unitsPerCase: true,
+    caseCost: true,
+    unitCost: true,
+    unitCostAfterDiscountAndRebate: true,
+    unitRetail: true,
+    minInventory: true,
+    trackInventory: true,
+    isActive: true,
+    createdAt: true,
+    department: { select: { id: true, name: true } },
+  } satisfies Prisma.ProductSelect;
+
   private readonly inventoryLogInclude = {
     product: true,
     staff: true,
@@ -3879,6 +4461,10 @@ type ProductUpdateDto = Partial<Omit<ProductCreateDto, 'storeId'>>;
 
 type PriceBookProductRecord = Prisma.ProductGetPayload<{
   select: ProductService['priceBookProductSelect'];
+}>;
+
+type InventoryOverviewProductRecord = Prisma.ProductGetPayload<{
+  select: ProductService['inventoryOverviewProductSelect'];
 }>;
 
 type DepartmentUpdateData = {
