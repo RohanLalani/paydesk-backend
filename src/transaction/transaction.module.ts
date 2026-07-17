@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AuditService } from '../audit/audit.service';
 import { PosAccessService } from '../common/pos-access.service';
 import { TaxCalculationService } from '../common/tax-calculation.service';
 import { PrismaService } from '../prisma.service';
@@ -12,6 +13,7 @@ import { TransactionService } from './transaction.service';
   controllers: [TransactionController, ReceiptController],
   providers: [
     TransactionService,
+    AuditService,
     PrismaService,
     PosAccessService,
     TaxCalculationService,

@@ -3,8 +3,11 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
+  AuditAction,
+  AuditEntityType,
   Prisma,
   StaffRole,
   StoreFeatureKey,
@@ -15,15 +18,24 @@ import {
   SubscriptionPlan,
   SubscriptionStatus,
 } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
+
+type AuditRecorder = {
+  record: (...args: Parameters<AuditService['record']>) => Promise<unknown>;
+};
+
+const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
 
 @Injectable()
 export class StoreService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    @Optional()
+    private readonly audit: AuditService = NOOP_AUDIT as unknown as AuditService,
   ) {}
 
   calculateStorePricing(activeStoreCount: number, plan: SubscriptionPlan) {
@@ -174,22 +186,38 @@ export class StoreService {
 
     const dto = this.parseCreateBody(body);
 
-    const store = await this.prisma.store.create({
-      data: {
-        name: dto.name,
-        address: dto.address,
-        businessType: dto.businessType,
-        ownerId: user.accountId,
-        isActive: false,
-        features: {
-          create: this.includedFeatureKeys.map((feature) => ({
-            feature,
-            enabled: dto.features.includes(feature),
-            source: StoreFeatureSource.setup,
-          })),
+    const store = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.store.create({
+        data: {
+          name: dto.name,
+          address: dto.address,
+          businessType: dto.businessType,
+          ownerId: user.accountId,
+          isActive: false,
+          features: {
+            create: this.includedFeatureKeys.map((feature) => ({
+              feature,
+              enabled: dto.features.includes(feature),
+              source: StoreFeatureSource.setup,
+            })),
+          },
         },
-      },
-      include: this.storeInclude,
+        include: this.storeInclude,
+      });
+
+      await this.audit.record(tx, {
+        storeId: created.id,
+        actorId: user.staffId,
+        ownerId: user.accountId,
+        action: AuditAction.create,
+        entityType: AuditEntityType.store,
+        entityId: created.id,
+        entityName: created.name,
+        summary: `Created store ${created.name}`,
+        after: created,
+      });
+
+      return created;
     });
 
     return this.serializeStore(store);
@@ -239,6 +267,18 @@ export class StoreService {
       });
 
       await this.updateOwnerBilling(user.accountId, tx);
+      await this.audit.record(tx, {
+        storeId: store.id,
+        actorId: user.staffId,
+        ownerId: user.accountId,
+        action: AuditAction.activate,
+        entityType: AuditEntityType.store,
+        entityId: store.id,
+        entityName: activatedStore.name,
+        summary: `Activated store ${activatedStore.name}`,
+        before: store,
+        after: activatedStore,
+      });
 
       return this.serializeStore(activatedStore);
     });
@@ -252,10 +292,28 @@ export class StoreService {
     await this.assertCanManageStore(user, storeId);
     const updates = this.parseUpdateBody(body);
 
-    const store = await this.prisma.store.update({
-      where: { id: storeId },
-      data: updates,
-      include: this.storeInclude,
+    const store = await this.prisma.$transaction(async (tx) => {
+      const before = await tx.store.findUnique({ where: { id: storeId } });
+      const updated = await tx.store.update({
+        where: { id: storeId },
+        data: updates,
+        include: this.storeInclude,
+      });
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: user.type === StaffRole.owner ? user.accountId : null,
+        action: AuditAction.update,
+        entityType: AuditEntityType.store,
+        entityId: storeId,
+        entityName: updated.name,
+        summary: `Updated store ${updated.name}`,
+        before,
+        after: updated,
+      });
+
+      return updated;
     });
 
     return this.serializeStore(store);
@@ -280,6 +338,18 @@ export class StoreService {
       });
 
       await this.updateOwnerBilling(store.ownerId, tx);
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: store.ownerId,
+        action: AuditAction.deactivate,
+        entityType: AuditEntityType.store,
+        entityId: storeId,
+        entityName: deletedStore.name,
+        summary: `Deactivated store ${deletedStore.name}`,
+        before: store,
+        after: deletedStore,
+      });
 
       return this.serializeStore(deletedStore);
     });
@@ -378,10 +448,25 @@ export class StoreService {
         ),
       );
 
-      return tx.store.findUnique({
+      const updatedStore = await tx.store.findUnique({
         where: { id: storeId },
         include: this.storeEntitlementInclude,
       });
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: user.accountId,
+        action: AuditAction.update,
+        entityType: AuditEntityType.store_feature,
+        entityId: storeId,
+        entityName: updatedStore?.id ?? storeId,
+        summary: 'Updated store features',
+        after: updatedStore,
+        metadata: updates,
+      });
+
+      return updatedStore;
     });
 
     if (!store) {

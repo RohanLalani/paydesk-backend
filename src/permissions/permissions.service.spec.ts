@@ -185,7 +185,7 @@ describe('PermissionsService', () => {
 });
 
 function createMockPrisma(): MockPrisma {
-  return {
+  const prisma = {
     store: {
       findFirst: jest.fn().mockResolvedValue(storeFixture()),
     },
@@ -197,8 +197,14 @@ function createMockPrisma(): MockPrisma {
       deleteMany: jest.fn().mockReturnValue({}),
       createMany: jest.fn().mockReturnValue({}),
     },
-    $transaction: jest.fn().mockResolvedValue(undefined),
+    $transaction: jest.fn(),
   };
+
+  prisma.$transaction.mockImplementation(
+    (callback: (tx: MockPrisma) => unknown) => callback(prisma),
+  );
+
+  return prisma;
 }
 
 function storeFixture() {

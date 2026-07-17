@@ -4,15 +4,29 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
-import { CustomerTierDiscountModel, Prisma, StaffRole } from '@prisma/client';
+import {
+  AuditAction,
+  AuditEntityType,
+  CustomerTierDiscountModel,
+  Prisma,
+  StaffRole,
+} from '@prisma/client';
 import { randomInt } from 'crypto';
+import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import {
   PosAccessService,
   StorePermission,
 } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
+
+type AuditRecorder = {
+  record: (...args: Parameters<AuditService['record']>) => Promise<unknown>;
+};
+
+const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
 
 @Injectable()
 export class CustomerService {
@@ -21,6 +35,8 @@ export class CustomerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    @Optional()
+    private readonly audit: AuditService = NOOP_AUDIT as unknown as AuditService,
   ) {}
 
   async create(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -33,20 +49,36 @@ export class CustomerService {
     const customerNumber = await this.generateUniqueCustomerNumber();
 
     try {
-      const customer = await this.prisma.customer.create({
-        data: {
-          customerNumber,
-          email: dto.email,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          phone: dto.phone,
-          stores: {
-            create: {
-              storeId: store.id,
+      const customer = await this.runInTransaction(async (tx) => {
+        const created = await tx.customer.create({
+          data: {
+            customerNumber,
+            email: dto.email,
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            phone: dto.phone,
+            stores: {
+              create: {
+                storeId: store.id,
+              },
             },
           },
-        },
-        include: this.customerInclude,
+          include: this.customerInclude,
+        });
+
+        await this.audit.record(tx, {
+          storeId: store.id,
+          actorId: user.staffId,
+          ownerId: user.type === StaffRole.owner ? user.accountId : null,
+          action: AuditAction.create,
+          entityType: AuditEntityType.customer,
+          entityId: created.id,
+          entityName: `${created.firstName} ${created.lastName}`,
+          summary: `Created customer ${created.firstName} ${created.lastName}`,
+          after: created,
+        });
+
+        return created;
       });
 
       return this.toCustomerResponse(customer, [store.id]);
@@ -140,10 +172,26 @@ export class CustomerService {
     }
 
     try {
-      const customer = await this.prisma.customer.update({
-        where: { id },
-        data: updates,
-        include: this.customerInclude,
+      const customer = await this.runInTransaction(async (tx) => {
+        const updated = await tx.customer.update({
+          where: { id },
+          data: updates,
+          include: this.customerInclude,
+        });
+
+        await this.audit.record(tx, {
+          storeId: accessibleStoreIds[0],
+          actorId: user.staffId,
+          ownerId: user.type === StaffRole.owner ? user.accountId : null,
+          action: AuditAction.update,
+          entityType: AuditEntityType.customer,
+          entityId: updated.id,
+          entityName: `${updated.firstName} ${updated.lastName}`,
+          summary: `Updated customer ${updated.firstName} ${updated.lastName}`,
+          after: updated,
+        });
+
+        return updated;
       });
 
       return this.toCustomerResponse(customer, accessibleStoreIds);
@@ -171,14 +219,30 @@ export class CustomerService {
     }
 
     try {
-      const tier = await this.prisma.customerTier.create({
-        data: {
-          name: dto.name,
-          discountModel: dto.discountModel,
-          discountValue: dto.discountValue,
-          ownerId: store.ownerId,
+      const tier = await this.runInTransaction(async (tx) => {
+        const created = await tx.customerTier.create({
+          data: {
+            name: dto.name,
+            discountModel: dto.discountModel,
+            discountValue: dto.discountValue,
+            ownerId: store.ownerId,
+            storeId: store.id,
+          },
+        });
+
+        await this.audit.record(tx, {
           storeId: store.id,
-        },
+          actorId: user.staffId,
+          ownerId: store.ownerId,
+          action: AuditAction.create,
+          entityType: AuditEntityType.customer,
+          entityId: created.id,
+          entityName: created.name,
+          summary: `Created customer tier ${created.name}`,
+          after: created,
+        });
+
+        return created;
       });
 
       return this.toTierResponse(tier);
@@ -214,16 +278,32 @@ export class CustomerService {
       throw new BadRequestException('name or tierId is required');
     }
 
-    const tierRule = await this.prisma.customerTierRule.create({
-      data: {
-        name: ruleName,
-        minimumSpend: dto.minimumSpend,
-        syncAcrossOwnerStores: dto.syncAcrossOwnerStores,
-        ownerId: store.ownerId,
+    const tierRule = await this.runInTransaction(async (tx) => {
+      const created = await tx.customerTierRule.create({
+        data: {
+          name: ruleName,
+          minimumSpend: dto.minimumSpend,
+          syncAcrossOwnerStores: dto.syncAcrossOwnerStores,
+          ownerId: store.ownerId,
+          storeId: store.id,
+          tierId: tier?.id,
+        },
+        include: { tier: true },
+      });
+
+      await this.audit.record(tx, {
         storeId: store.id,
-        tierId: tier?.id,
-      },
-      include: { tier: true },
+        actorId: user.staffId,
+        ownerId: store.ownerId,
+        action: AuditAction.create,
+        entityType: AuditEntityType.customer,
+        entityId: created.id,
+        entityName: created.name,
+        summary: `Created customer tier rule ${created.name}`,
+        after: created,
+      });
+
+      return created;
     });
 
     return this.toTierRuleResponse(tierRule);
@@ -321,6 +401,28 @@ export class CustomerService {
       message:
         'Weekly customer tier recalculation placeholder. Wire this method to a scheduler when automation is added.',
     };
+  }
+
+  private runInTransaction<T>(
+    callback: (tx: Prisma.TransactionClient) => Promise<T>,
+  ) {
+    if (typeof this.prisma.$transaction === 'function') {
+      const transactionResult = this.prisma.$transaction(callback);
+
+      if (transactionResult === undefined) {
+        return callback(this.prisma);
+      }
+
+      return transactionResult.then((result) => {
+        if (result !== undefined) {
+          return result;
+        }
+
+        return callback(this.prisma);
+      });
+    }
+
+    return callback(this.prisma);
   }
 
   private async findBestTierRule(customerId: string, storeId: string) {

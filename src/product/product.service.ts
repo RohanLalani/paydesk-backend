@@ -4,8 +4,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
+  AuditAction,
+  AuditEntityType,
   DepartmentMinimumAge,
   DepartmentType,
   InventoryActionType,
@@ -13,9 +16,16 @@ import {
   ProductSaleType,
   TaxStyle,
 } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
+
+type AuditRecorder = {
+  record: (...args: Parameters<AuditService['record']>) => Promise<unknown>;
+};
+
+const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
 
 @Injectable()
 export class ProductService {
@@ -24,6 +34,8 @@ export class ProductService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    @Optional()
+    private readonly audit: AuditService = NOOP_AUDIT as unknown as AuditService,
   ) {}
 
   async createDepartment(
@@ -130,16 +142,32 @@ export class ProductService {
     await this.ensureActiveTaxInStore(storeId, dto.defaultTaxId);
 
     try {
-      const department = await this.prisma.department.create({
-        data: {
+      const department = await this.runInTransaction(async (tx) => {
+        const created = await tx.department.create({
+          data: {
+            storeId,
+            ...dto,
+            defaultAllowEbt: dto.allowEbt,
+          },
+          include: {
+            _count: { select: { products: true } },
+            defaultTax: true,
+          },
+        });
+
+        await this.audit.record(tx, {
           storeId,
-          ...dto,
-          defaultAllowEbt: dto.allowEbt,
-        },
-        include: {
-          _count: { select: { products: true } },
-          defaultTax: true,
-        },
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: AuditAction.create,
+          entityType: AuditEntityType.department,
+          entityId: created.id,
+          entityName: created.name,
+          summary: `Created department ${created.name}`,
+          after: created,
+        });
+
+        return created;
       });
       return this.serializeDepartment(department);
     } catch (error) {
@@ -180,18 +208,37 @@ export class ProductService {
     }
 
     try {
-      const updated = await this.prisma.department.update({
-        where: { id: department.id },
-        data: {
-          ...data,
-          ...(data.allowEbt === undefined
-            ? {}
-            : { defaultAllowEbt: data.allowEbt }),
-        },
-        include: {
-          _count: { select: { products: true } },
-          defaultTax: true,
-        },
+      const updated = await this.runInTransaction(async (tx) => {
+        const updatedDepartment = await tx.department.update({
+          where: { id: department.id },
+          data: {
+            ...data,
+            ...(data.allowEbt === undefined
+              ? {}
+              : { defaultAllowEbt: data.allowEbt }),
+          },
+          include: {
+            _count: { select: { products: true } },
+            defaultTax: true,
+          },
+        });
+
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: updatedDepartment.isActive
+            ? AuditAction.update
+            : AuditAction.deactivate,
+          entityType: AuditEntityType.department,
+          entityId: updatedDepartment.id,
+          entityName: updatedDepartment.name,
+          summary: `Updated department ${updatedDepartment.name}`,
+          before: department,
+          after: updatedDepartment,
+        });
+
+        return updatedDepartment;
       });
       return this.serializeDepartment(updated);
     } catch (error) {
@@ -244,9 +291,26 @@ export class ProductService {
       'Department is used by products and cannot be deleted',
     );
 
-    return this.prisma.department.update({
-      where: { id },
-      data: { isActive: false },
+    return this.runInTransaction(async (tx) => {
+      const updated = await tx.department.update({
+        where: { id },
+        data: { isActive: false },
+      });
+
+      await this.audit.record(tx, {
+        storeId: department.storeId,
+        actorId: user.staffId,
+        ownerId: user.type === 'owner' ? user.accountId : null,
+        action: AuditAction.deactivate,
+        entityType: AuditEntityType.department,
+        entityId: updated.id,
+        entityName: updated.name,
+        summary: `Deactivated department ${updated.name}`,
+        before: department,
+        after: updated,
+      });
+
+      return updated;
     });
   }
 
@@ -309,13 +373,29 @@ export class ProductService {
     await this.ensurePriceGroupNameAvailable(storeId, dto.name);
 
     try {
-      const priceGroup = await this.prisma.priceGroup.create({
-        data: {
-          ...dto,
+      const priceGroup = await this.runInTransaction(async (tx) => {
+        const created = await tx.priceGroup.create({
+          data: {
+            ...dto,
+            storeId,
+            mismatchCountUpdatedAt: new Date(),
+          },
+          include: { _count: { select: { products: true } } },
+        });
+
+        await this.audit.record(tx, {
           storeId,
-          mismatchCountUpdatedAt: new Date(),
-        },
-        include: { _count: { select: { products: true } } },
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: AuditAction.create,
+          entityType: AuditEntityType.price_group,
+          entityId: created.id,
+          entityName: created.name,
+          summary: `Created price group ${created.name}`,
+          after: created,
+        });
+
+        return created;
       });
 
       return this.serializePriceGroup(priceGroup);
@@ -371,10 +451,29 @@ export class ProductService {
       );
 
     try {
-      const updated = await this.prisma.priceGroup.update({
-        where: { id: priceGroupId },
-        data,
-        include: { _count: { select: { products: true } } },
+      const updated = await this.runInTransaction(async (tx) => {
+        const updatedPriceGroup = await tx.priceGroup.update({
+          where: { id: priceGroupId },
+          data,
+          include: { _count: { select: { products: true } } },
+        });
+
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: updatedPriceGroup.isActive
+            ? AuditAction.update
+            : AuditAction.deactivate,
+          entityType: AuditEntityType.price_group,
+          entityId: updatedPriceGroup.id,
+          entityName: updatedPriceGroup.name,
+          summary: `Updated price group ${updatedPriceGroup.name}`,
+          before: priceGroup,
+          after: updatedPriceGroup,
+        });
+
+        return updatedPriceGroup;
       });
 
       if (defaultPriceChanged) {
@@ -484,9 +583,26 @@ export class ProductService {
       'manage_products',
     );
 
-    return this.prisma.priceGroup.update({
-      where: { id },
-      data: { isActive: false },
+    return this.runInTransaction(async (tx) => {
+      const updated = await tx.priceGroup.update({
+        where: { id },
+        data: { isActive: false },
+      });
+
+      await this.audit.record(tx, {
+        storeId: priceGroup.storeId,
+        actorId: user.staffId,
+        ownerId: user.type === 'owner' ? user.accountId : null,
+        action: AuditAction.deactivate,
+        entityType: AuditEntityType.price_group,
+        entityId: updated.id,
+        entityName: updated.name,
+        summary: `Deactivated price group ${updated.name}`,
+        before: priceGroup,
+        after: updated,
+      });
+
+      return updated;
     });
   }
 
@@ -609,12 +725,28 @@ export class ProductService {
     await this.ensureCategoryNameAvailable(storeId, dto.departmentId, dto.name);
 
     try {
-      const category = await this.prisma.productCategory.create({
-        data: { ...dto, storeId },
-        include: {
-          department: true,
-          _count: { select: { products: true } },
-        },
+      const category = await this.runInTransaction(async (tx) => {
+        const created = await tx.productCategory.create({
+          data: { ...dto, storeId },
+          include: {
+            department: true,
+            _count: { select: { products: true } },
+          },
+        });
+
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: AuditAction.create,
+          entityType: AuditEntityType.product_category,
+          entityId: created.id,
+          entityName: created.name,
+          summary: `Created product category ${created.name}`,
+          after: created,
+        });
+
+        return created;
       });
 
       return this.serializeProductCategory(category);
@@ -686,13 +818,32 @@ export class ProductService {
     }
 
     try {
-      const updated = await this.prisma.productCategory.update({
-        where: { id: categoryId },
-        data,
-        include: {
-          department: true,
-          _count: { select: { products: true } },
-        },
+      const updated = await this.runInTransaction(async (tx) => {
+        const updatedCategory = await tx.productCategory.update({
+          where: { id: categoryId },
+          data,
+          include: {
+            department: true,
+            _count: { select: { products: true } },
+          },
+        });
+
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: updatedCategory.isActive
+            ? AuditAction.update
+            : AuditAction.deactivate,
+          entityType: AuditEntityType.product_category,
+          entityId: updatedCategory.id,
+          entityName: updatedCategory.name,
+          summary: `Updated product category ${updatedCategory.name}`,
+          before: category,
+          after: updatedCategory,
+        });
+
+        return updatedCategory;
       });
 
       return this.serializeProductCategory(updated);
@@ -776,9 +927,26 @@ export class ProductService {
       'Product category is used by products and cannot be deleted',
     );
 
-    return this.prisma.productCategory.update({
-      where: { id },
-      data: { isActive: false },
+    return this.runInTransaction(async (tx) => {
+      const updated = await tx.productCategory.update({
+        where: { id },
+        data: { isActive: false },
+      });
+
+      await this.audit.record(tx, {
+        storeId: productCategory.storeId,
+        actorId: user.staffId,
+        ownerId: user.type === 'owner' ? user.accountId : null,
+        action: AuditAction.deactivate,
+        entityType: AuditEntityType.product_category,
+        entityId: updated.id,
+        entityName: updated.name,
+        summary: `Deactivated product category ${updated.name}`,
+        before: productCategory,
+        after: updated,
+      });
+
+      return updated;
     });
   }
 
@@ -803,7 +971,23 @@ export class ProductService {
     await this.ensureTaxNameAvailable(storeId, dto.name);
 
     try {
-      const tax = await this.prisma.tax.create({ data: { storeId, ...dto } });
+      const tax = await this.runInTransaction(async (tx) => {
+        const created = await tx.tax.create({ data: { storeId, ...dto } });
+
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: AuditAction.create,
+          entityType: AuditEntityType.tax,
+          entityId: created.id,
+          entityName: created.name,
+          summary: `Created tax ${created.name}`,
+          after: created,
+        });
+
+        return created;
+      });
       return options.response === 'legacy'
         ? this.serializeTaxReference(tax)
         : this.serializeTax(tax);
@@ -924,10 +1108,29 @@ export class ProductService {
     }
 
     try {
-      const updated = await this.prisma.tax.update({
-        where: { id: tax.id },
-        data,
-        include: { _count: { select: { departments: true } } },
+      const updated = await this.runInTransaction(async (tx) => {
+        const updatedTax = await tx.tax.update({
+          where: { id: tax.id },
+          data,
+          include: { _count: { select: { departments: true } } },
+        });
+
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: updatedTax.isActive
+            ? AuditAction.update
+            : AuditAction.deactivate,
+          entityType: AuditEntityType.tax,
+          entityId: updatedTax.id,
+          entityName: updatedTax.name,
+          summary: `Updated tax ${updatedTax.name}`,
+          before: tax,
+          after: updatedTax,
+        });
+
+        return updatedTax;
       });
       return options.response === 'legacy'
         ? this.serializeTaxReference(updated)
@@ -946,9 +1149,26 @@ export class ProductService {
       'Tax is used by products and cannot be deleted',
     );
 
-    return this.prisma.tax.update({
-      where: { id },
-      data: { isActive: false },
+    return this.runInTransaction(async (tx) => {
+      const updated = await tx.tax.update({
+        where: { id },
+        data: { isActive: false },
+      });
+
+      await this.audit.record(tx, {
+        storeId: tax.storeId,
+        actorId: user.staffId,
+        ownerId: user.type === 'owner' ? user.accountId : null,
+        action: AuditAction.deactivate,
+        entityType: AuditEntityType.tax,
+        entityId: updated.id,
+        entityName: updated.name,
+        summary: `Deactivated tax ${updated.name}`,
+        before: tax,
+        after: updated,
+      });
+
+      return updated;
     });
   }
 
@@ -966,7 +1186,7 @@ export class ProductService {
     const calculated = this.calculateProductFields(dto);
 
     try {
-      const product = await this.prisma.$transaction(async (tx) => {
+      const product = await this.runInTransaction(async (tx) => {
         const updatedStore = await tx.store.update({
           where: { id: dto.storeId },
           data: { nextProductNumber: { increment: 1 } },
@@ -996,6 +1216,18 @@ export class ProductService {
             reason: 'initial_quantity',
           });
         }
+
+        await this.audit.record(tx, {
+          storeId: product.storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: AuditAction.create,
+          entityType: AuditEntityType.product,
+          entityId: product.id,
+          entityName: product.name,
+          summary: `Created product ${product.name}`,
+          after: product,
+        });
 
         return product;
       });
@@ -1060,7 +1292,7 @@ export class ProductService {
     }
 
     try {
-      const updated = await this.prisma.$transaction(async (tx) => {
+      const updated = await this.runInTransaction(async (tx) => {
         const updated = await tx.product.update({
           where: { id: productId },
           data,
@@ -1082,6 +1314,21 @@ export class ProductService {
             reason: 'manual_edit',
           });
         }
+
+        await this.audit.record(tx, {
+          storeId: product.storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: updated.isActive
+            ? AuditAction.update
+            : AuditAction.deactivate,
+          entityType: AuditEntityType.product,
+          entityId: updated.id,
+          entityName: updated.name,
+          summary: `Updated product ${updated.name}`,
+          before: product,
+          after: updated,
+        });
 
         return updated;
       });
@@ -1207,10 +1454,27 @@ export class ProductService {
       'manage_products',
     );
 
-    const removed = await this.prisma.product.update({
-      where: { id: productId },
-      data: { isActive: false },
-      include: this.productInclude,
+    const removed = await this.runInTransaction(async (tx) => {
+      const updated = await tx.product.update({
+        where: { id: productId },
+        data: { isActive: false },
+        include: this.productInclude,
+      });
+
+      await this.audit.record(tx, {
+        storeId: product.storeId,
+        actorId: user.staffId,
+        ownerId: user.type === 'owner' ? user.accountId : null,
+        action: AuditAction.deactivate,
+        entityType: AuditEntityType.product,
+        entityId: updated.id,
+        entityName: updated.name,
+        summary: `Deactivated product ${updated.name}`,
+        before: product,
+        after: updated,
+      });
+
+      return updated;
     });
     await this.safeRecountPriceGroups([product.priceGroupId]);
     return removed;
@@ -1223,7 +1487,7 @@ export class ProductService {
     const dto = this.parseReceiveInventoryBody(body);
     await this.access.ensureStoreAccess(dto.storeId, user, 'manage_inventory');
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.runInTransaction(async (tx) => {
       const updatedProducts: unknown[] = [];
 
       for (const item of dto.items) {
@@ -1267,6 +1531,24 @@ export class ProductService {
           referenceId: item.referenceId,
         });
 
+        await this.audit.record(tx, {
+          storeId: dto.storeId,
+          actorId: user.staffId,
+          ownerId: user.type === 'owner' ? user.accountId : null,
+          action: AuditAction.update,
+          entityType: AuditEntityType.inventory,
+          entityId: product.id,
+          entityName: product.name,
+          summary: `Received ${item.quantity} units for ${product.name}`,
+          before: product,
+          after: updated,
+          metadata: {
+            actionType: InventoryActionType.receive,
+            quantityChanged: item.quantity,
+            referenceId: item.referenceId,
+          },
+        });
+
         updatedProducts.push(updated);
       }
 
@@ -1278,7 +1560,7 @@ export class ProductService {
     const dto = this.parseAdjustInventoryBody(body);
     await this.access.ensureStoreAccess(dto.storeId, user, 'manage_inventory');
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.runInTransaction(async (tx) => {
       const product = await this.findActiveProductInStoreOrThrow(
         tx,
         dto.productId,
@@ -1307,6 +1589,24 @@ export class ProductService {
         reason: dto.reason,
         notes: dto.notes,
         referenceType: 'adjustment',
+      });
+
+      await this.audit.record(tx, {
+        storeId: dto.storeId,
+        actorId: user.staffId,
+        ownerId: user.type === 'owner' ? user.accountId : null,
+        action: AuditAction.update,
+        entityType: AuditEntityType.inventory,
+        entityId: product.id,
+        entityName: product.name,
+        summary: `Adjusted inventory for ${product.name}`,
+        before: product,
+        after: updated,
+        metadata: {
+          actionType: InventoryActionType.adjustment,
+          quantityChanged: dto.adjustment,
+          reason: dto.reason,
+        },
       });
 
       return updated;
@@ -1401,6 +1701,16 @@ export class ProductService {
     }
 
     return product;
+  }
+
+  private runInTransaction<T>(
+    callback: (tx: Prisma.TransactionClient) => Promise<T>,
+  ) {
+    if (typeof this.prisma.$transaction === 'function') {
+      return this.prisma.$transaction(callback);
+    }
+
+    return callback(this.prisma);
   }
 
   private createInventoryLog(

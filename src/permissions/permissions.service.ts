@@ -3,8 +3,15 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
-import { StaffRole, StorePermissionKey } from '@prisma/client';
+import {
+  AuditAction,
+  AuditEntityType,
+  StaffRole,
+  StorePermissionKey,
+} from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
@@ -57,6 +64,11 @@ const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
       'Allows adding, editing, deactivating, revoking, and managing POS registers for a store.',
   },
   {
+    key: StorePermissionKey.view_audit_logs,
+    label: 'View Audit Logs',
+    description: 'Can review back-office activity and audit history.',
+  },
+  {
     key: StorePermissionKey.view_reports,
     label: 'View Reports',
     description: 'Can view store reports',
@@ -76,12 +88,19 @@ const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
 const PERMISSION_KEYS = new Set<StorePermissionKey>(
   PERMISSION_DEFINITIONS.map((definition) => definition.key),
 );
+type AuditRecorder = {
+  record: (...args: Parameters<AuditService['record']>) => Promise<unknown>;
+};
+
+const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
 
 @Injectable()
 export class PermissionsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    @Optional()
+    private readonly audit: AuditService = NOOP_AUDIT as unknown as AuditService,
   ) {}
 
   keys() {
@@ -174,24 +193,40 @@ export class PermissionsService {
       throw new NotFoundException('Staff assignment not found');
     }
 
+    const beforePermissions = await this.access.getEffectivePermissionsForStaff(
+      storeId,
+      staffId,
+    );
     const permissions = this.parsePermissions(body);
 
-    await this.prisma.$transaction([
-      this.prisma.storeStaffPermission.deleteMany({
+    await this.prisma.$transaction(async (tx) => {
+      await tx.storeStaffPermission.deleteMany({
         where: { storeStaffId: assignment.id },
-      }),
-      ...(permissions.length
-        ? [
-            this.prisma.storeStaffPermission.createMany({
-              data: permissions.map((permission) => ({
-                storeStaffId: assignment.id,
-                permission,
-              })),
-              skipDuplicates: true,
-            }),
-          ]
-        : []),
-    ]);
+      });
+
+      if (permissions.length) {
+        await tx.storeStaffPermission.createMany({
+          data: permissions.map((permission) => ({
+            storeStaffId: assignment.id,
+            permission,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: store.owner.id,
+        action: AuditAction.update,
+        entityType: AuditEntityType.staff_permission,
+        entityId: assignment.staff.id,
+        entityName: assignment.staff.name ?? assignment.staff.email,
+        summary: `Updated permissions for ${assignment.staff.name ?? assignment.staff.email}`,
+        before: { permissions: beforePermissions },
+        after: { permissions },
+      });
+    });
 
     return {
       staff: assignment.staff,

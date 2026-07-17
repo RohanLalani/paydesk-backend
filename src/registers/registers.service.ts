@@ -3,22 +3,37 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
-import { RegisterStatus, StaffRole, StorePermissionKey } from '@prisma/client';
+import {
+  AuditAction,
+  AuditEntityType,
+  RegisterStatus,
+  StaffRole,
+  StorePermissionKey,
+} from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
 
 const ACTIVATION_CODE_TTL_MS = 15 * 60 * 1000;
+type AuditRecorder = {
+  record: (...args: Parameters<AuditService['record']>) => Promise<unknown>;
+};
+
+const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
 
 @Injectable()
 export class RegistersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: PosAccessService,
+    @Optional()
+    private readonly audit: AuditService = NOOP_AUDIT as unknown as AuditService,
   ) {}
 
   async create(
@@ -33,13 +48,29 @@ export class RegistersService {
     );
     const dto = this.parseRegisterCreate(body);
 
-    const register = await this.prisma.register.create({
-      data: {
+    const register = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.register.create({
+        data: {
+          storeId,
+          name: dto.name,
+          registerNumber: dto.registerNumber,
+          description: dto.description,
+        },
+      });
+
+      await this.audit.record(tx, {
         storeId,
-        name: dto.name,
-        registerNumber: dto.registerNumber,
-        description: dto.description,
-      },
+        actorId: user.staffId,
+        ownerId: user.type === StaffRole.owner ? user.accountId : null,
+        action: AuditAction.create,
+        entityType: AuditEntityType.register,
+        entityId: created.id,
+        entityName: created.name,
+        summary: `Created register ${created.name}`,
+        after: created,
+      });
+
+      return created;
     });
 
     return this.toRegisterResponse(register);
@@ -75,16 +106,36 @@ export class RegistersService {
       user,
       StorePermissionKey.manage_registers,
     );
-    await this.findRegisterOrThrow(storeId, registerId);
+    const before = await this.findRegisterOrThrow(storeId, registerId);
     const dto = this.parseRegisterUpdate(body);
 
     if (!Object.keys(dto).length) {
       throw new BadRequestException('At least one register field is required');
     }
 
-    const register = await this.prisma.register.update({
-      where: { id: registerId },
-      data: dto,
+    const register = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.register.update({
+        where: { id: registerId },
+        data: dto,
+      });
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: user.type === StaffRole.owner ? user.accountId : null,
+        action:
+          updated.status === RegisterStatus.revoked
+            ? AuditAction.revoke
+            : AuditAction.update,
+        entityType: AuditEntityType.register,
+        entityId: updated.id,
+        entityName: updated.name,
+        summary: `Updated register ${updated.name}`,
+        before,
+        after: updated,
+      });
+
+      return updated;
     });
 
     return this.toRegisterResponse(register);
@@ -100,7 +151,7 @@ export class RegistersService {
       user,
       StorePermissionKey.manage_registers,
     );
-    await this.findRegisterOrThrow(storeId, registerId);
+    const before = await this.findRegisterOrThrow(storeId, registerId);
     const now = new Date();
 
     const register = await this.prisma.$transaction(async (tx) => {
@@ -109,10 +160,25 @@ export class RegistersService {
         data: { isActive: false, revokedAt: now },
       });
 
-      return tx.register.update({
+      const revoked = await tx.register.update({
         where: { id: registerId },
         data: { status: RegisterStatus.revoked },
       });
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: user.type === StaffRole.owner ? user.accountId : null,
+        action: AuditAction.revoke,
+        entityType: AuditEntityType.register,
+        entityId: revoked.id,
+        entityName: revoked.name,
+        summary: `Revoked register ${revoked.name}`,
+        before,
+        after: revoked,
+      });
+
+      return revoked;
     });
 
     return this.toRegisterResponse(register);
@@ -131,9 +197,27 @@ export class RegistersService {
     );
     await this.findRegisterOrThrow(storeId, registerId);
 
-    const result = await this.prisma.registerDevice.updateMany({
-      where: { id: deviceId, storeId, registerId, isActive: true },
-      data: { isActive: false, revokedAt: new Date() },
+    const result = await this.prisma.$transaction(async (tx) => {
+      const updateResult = await tx.registerDevice.updateMany({
+        where: { id: deviceId, storeId, registerId, isActive: true },
+        data: { isActive: false, revokedAt: new Date() },
+      });
+
+      if (updateResult.count === 1) {
+        await this.audit.record(tx, {
+          storeId,
+          actorId: user.staffId,
+          ownerId: user.type === StaffRole.owner ? user.accountId : null,
+          action: AuditAction.revoke,
+          entityType: AuditEntityType.register_device,
+          entityId: deviceId,
+          entityName: deviceId,
+          summary: 'Revoked register device',
+          metadata: { registerId, deviceId },
+        });
+      }
+
+      return updateResult;
     });
 
     if (result.count !== 1) {
@@ -182,6 +266,18 @@ export class RegistersService {
           expiresAt,
           createdByStaffId: user.staffId,
         },
+      });
+
+      await this.audit.record(tx, {
+        storeId,
+        actorId: user.staffId,
+        ownerId: user.type === StaffRole.owner ? user.accountId : null,
+        action: AuditAction.create,
+        entityType: AuditEntityType.register_activation_code,
+        entityId: registerId,
+        entityName: register.name,
+        summary: `Created activation code for ${register.name}`,
+        metadata: { registerId, expiresAt },
       });
     });
 
@@ -266,6 +362,22 @@ export class RegistersService {
           deviceFingerprint: dto.deviceFingerprint,
           deviceTokenHash: tokenHash,
           lastSeenAt: new Date(),
+        },
+      });
+
+      await this.audit.record(tx, {
+        storeId: activation.storeId,
+        actorId: activation.createdByStaffId,
+        action: AuditAction.activate,
+        entityType: AuditEntityType.register,
+        entityId: register.id,
+        entityName: register.name,
+        summary: `Activated register ${register.name}`,
+        before: activation.register,
+        after: register,
+        metadata: {
+          deviceName: dto.deviceName,
+          deviceFingerprint: dto.deviceFingerprint,
         },
       });
 

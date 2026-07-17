@@ -171,6 +171,39 @@ enum InventoryActionType {
   manual_edit
 }
 
+enum AuditAction {
+  create
+  update
+  delete
+  activate
+  deactivate
+  grant
+  revoke
+  login
+  logout
+  system
+}
+
+enum AuditEntityType {
+  store
+  store_feature
+  product
+  department
+  price_group
+  product_category
+  tax
+  inventory
+  staff_permission
+  register
+  register_device
+  register_activation_code
+  customer
+  transaction
+  cart
+  billing
+  auth
+}
+
 enum CustomerTierDiscountModel {
   ORDER_PERCENTAGE
   ORDER_FLAT_RATE
@@ -188,6 +221,7 @@ enum StorePermissionKey {
   manage_customers
   manage_employees
   manage_registers
+  view_audit_logs
   view_reports
   process_sales
   override_prices
@@ -215,6 +249,7 @@ model Staff {
   passwordResetTokens            PasswordResetToken[]
   emailVerificationTokens        EmailVerificationToken[]
   inventoryLogs                  InventoryLog[]
+  auditEvents                    AuditEvent[]
   transactions                   Transaction[]
   carts                          Cart[]
   createdRegisterActivationCodes RegisterActivationCode[]
@@ -267,6 +302,7 @@ model Owner {
   subscriptions     Subscription[]
   customerTiers     CustomerTier[]
   customerTierRules CustomerTierRule[]
+  auditEvents       AuditEvent[]
 }
 
 model Partner {
@@ -351,8 +387,39 @@ model Store {
   storeSubscription       StoreSubscription?
   features                StoreFeature[]
   serviceSubscriptions    StoreServiceSubscription[]
+  auditEvents             AuditEvent[]
 
   @@index([ownerId, isActive])
+}
+
+model AuditEvent {
+  id         String          @id @default(uuid())
+  storeId    String
+  actorId    String?
+  ownerId    String?
+  action     AuditAction
+  entityType AuditEntityType
+  entityId   String?
+  entityName String?
+  summary    String
+  before     Json?
+  after      Json?
+  changes    Json?
+  metadata   Json?
+  requestId  String?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime        @default(now())
+
+  store Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  actor Staff? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  owner Owner? @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([storeId, createdAt])
+  @@index([storeId, action, createdAt])
+  @@index([storeId, entityType, createdAt])
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
 }
 
 model StoreSubscription {

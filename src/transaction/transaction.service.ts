@@ -3,8 +3,11 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
+  AuditAction,
+  AuditEntityType,
   InventoryActionType,
   CartStatus,
   PaymentMethod,
@@ -13,11 +16,18 @@ import {
   TaxStyle,
   TransactionStatus,
 } from '@prisma/client';
+import { AuditService } from '../audit/audit.service';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
 import { TaxCalculationService } from '../common/tax-calculation.service';
 import { PrismaService } from '../prisma.service';
 import { RegistersService } from '../registers/registers.service';
+
+type AuditRecorder = {
+  record: (...args: Parameters<AuditService['record']>) => Promise<unknown>;
+};
+
+const NOOP_AUDIT: AuditRecorder = { record: () => Promise.resolve(null) };
 
 @Injectable()
 export class TransactionService {
@@ -26,6 +36,8 @@ export class TransactionService {
     private readonly access: PosAccessService,
     private readonly registers: RegistersService,
     private readonly taxCalculation: TaxCalculationService,
+    @Optional()
+    private readonly audit: AuditService = NOOP_AUDIT as unknown as AuditService,
   ) {}
 
   async validateCart(body: Record<string, unknown>, user: AuthTokenPayload) {
@@ -174,6 +186,24 @@ export class TransactionService {
           await tx.cart.update({
             where: { id: cart.id },
             data: { status: CartStatus.completed },
+          });
+
+          await this.audit.record(tx, {
+            storeId: cart.storeId,
+            actorId: user.staffId,
+            ownerId: user.type === 'owner' ? user.accountId : null,
+            action: AuditAction.create,
+            entityType: AuditEntityType.transaction,
+            entityId: transaction.id,
+            entityName: transaction.receiptNumber,
+            summary: `Completed transaction ${transaction.receiptNumber}`,
+            after: transaction,
+            metadata: {
+              cartId: cart.id,
+              total: validated.total,
+              paymentMethod: dto.paymentMethod,
+              registerId: registerContext?.register.id,
+            },
           });
 
           return {
