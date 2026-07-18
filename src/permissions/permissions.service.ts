@@ -58,6 +58,21 @@ const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
     description: 'Can receive, adjust, and change inventory',
   },
   {
+    key: StorePermissionKey.view_purchases,
+    label: 'View Purchases',
+    description: 'Can view store purchase history and supplier invoices.',
+  },
+  {
+    key: StorePermissionKey.manage_purchases,
+    label: 'Manage Purchases',
+    description: 'Can create and update store purchases.',
+  },
+  {
+    key: StorePermissionKey.manage_payees,
+    label: 'Manage Payees',
+    description: 'Can create and update store payees.',
+  },
+  {
     key: StorePermissionKey.manage_customers,
     label: 'Manage Customers',
     description: 'Can add and edit customers and loyalty settings',

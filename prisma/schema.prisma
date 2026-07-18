@@ -198,6 +198,8 @@ enum AuditEntityType {
   store
   store_feature
   product
+  payee
+  purchase
   department
   price_group
   product_category
@@ -258,6 +260,9 @@ enum StorePermissionKey {
   manage_multi_pack_pricing
   review_multi_pack_pricing
   manage_inventory
+  view_purchases
+  manage_purchases
+  manage_payees
   manage_customers
   manage_employees
   manage_registers
@@ -271,6 +276,19 @@ enum RegisterStatus {
   inactive
   active
   revoked
+}
+
+enum PurchaseType {
+  CASH_DAILY
+  CHECK
+  CREDIT
+}
+
+enum PurchaseStatus {
+  DRAFT
+  OPEN
+  VERIFIED
+  VOIDED
 }
 
 model Staff {
@@ -293,6 +311,8 @@ model Staff {
   transactions                   Transaction[]
   carts                          Cart[]
   createdRegisterActivationCodes RegisterActivationCode[]
+  purchasesCreated               Purchase[]               @relation("PurchaseCreatedBy")
+  purchasesUpdated               Purchase[]               @relation("PurchaseUpdatedBy")
 }
 
 model PasswordResetToken {
@@ -395,11 +415,12 @@ model Employee {
 }
 
 model Store {
-  id                String            @id @default(uuid())
-  name              String
-  address           String?
-  businessType      StoreBusinessType @default(other)
-  nextProductNumber Int               @default(1)
+  id                 String            @id @default(uuid())
+  name               String
+  address            String?
+  businessType       StoreBusinessType @default(other)
+  nextProductNumber  Int               @default(1)
+  nextPurchaseNumber Int               @default(1)
 
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
@@ -417,6 +438,8 @@ model Store {
   priceGroups             PriceGroup[]
   productCategories       ProductCategory[]
   taxes                   Tax[]
+  payees                  Payee[]
+  purchases               Purchase[]
   customers               CustomerStore[]
   customerTiers           CustomerTier[]
   customerTierRules       CustomerTierRule[]
@@ -727,6 +750,7 @@ model Product {
 
   inventoryLogs      InventoryLog[]
   transactionItems   TransactionItem[]
+  purchaseItems      PurchaseItem[]
   cartItems          CartItem[]
   multiPacks         ProductMultiPack[]
   multiPackProposals MultiPackProposal[]
@@ -946,6 +970,98 @@ model Tax {
 
   @@unique([storeId, name])
   @@index([storeId, isActive])
+}
+
+model Payee {
+  id            String   @id @default(uuid())
+  name          String
+  accountNumber String?
+  contactName   String?
+  email         String?
+  phone         String?
+  addressLine1  String?
+  addressLine2  String?
+  city          String?
+  state         String?
+  postalCode    String?
+  notes         String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  purchases Purchase[]
+
+  @@unique([storeId, name])
+  @@index([storeId, isActive, name])
+}
+
+model Purchase {
+  id              String         @id @default(uuid())
+  purchaseNumber  Int
+  invoiceNumber   String
+  purchaseDate    DateTime
+  type            PurchaseType
+  status          PurchaseStatus @default(DRAFT)
+  costSubtotal    Decimal        @default(0.00) @db.Decimal(14, 2)
+  retailTotal     Decimal        @default(0.00) @db.Decimal(14, 2)
+  freightAmount   Decimal        @default(0.00) @db.Decimal(14, 2)
+  feeAmount       Decimal        @default(0.00) @db.Decimal(14, 2)
+  taxAmount       Decimal        @default(0.00) @db.Decimal(14, 2)
+  discountAmount  Decimal        @default(0.00) @db.Decimal(14, 2)
+  rebateAmount    Decimal        @default(0.00) @db.Decimal(14, 2)
+  totalCost       Decimal        @default(0.00) @db.Decimal(14, 2)
+  marginPercent   Decimal?       @db.Decimal(8, 4)
+  referenceNumber String?
+  notes           String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  storeId String
+  store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  payeeId String
+  payee   Payee  @relation(fields: [payeeId], references: [id])
+
+  createdByActorId String?
+  createdByActor   Staff?  @relation("PurchaseCreatedBy", fields: [createdByActorId], references: [id], onDelete: SetNull)
+
+  updatedByActorId String?
+  updatedByActor   Staff?  @relation("PurchaseUpdatedBy", fields: [updatedByActorId], references: [id], onDelete: SetNull)
+
+  items PurchaseItem[]
+
+  @@unique([storeId, purchaseNumber])
+  @@unique([storeId, payeeId, invoiceNumber])
+  @@index([storeId, purchaseDate])
+  @@index([storeId, status, purchaseDate])
+  @@index([storeId, payeeId, purchaseDate])
+  @@index([storeId, type, purchaseDate])
+  @@index([storeId, purchaseNumber])
+}
+
+model PurchaseItem {
+  id                    String   @id @default(uuid())
+  purchaseId            String
+  productId             String
+  quantity              Int
+  unitCost              Decimal  @db.Decimal(14, 4)
+  extendedCost          Decimal  @db.Decimal(14, 2)
+  unitRetailSnapshot    Decimal  @db.Decimal(14, 2)
+  extendedRetail        Decimal  @db.Decimal(14, 2)
+  productNumberSnapshot Int?
+  barcodeSnapshot       String?
+  productNameSnapshot   String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@index([purchaseId])
+  @@index([productId, purchaseId])
 }
 
 model Customer {

@@ -13,6 +13,7 @@ import { CustomerModule } from './customer/customer.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { MultiPackModule } from './multi-pack/multi-pack.module';
 import { ProductModule } from './product/product.module';
+import { PurchaseModule } from './purchase/purchase.module';
 import { PermissionsModule } from './permissions/permissions.module';
 import { RegistersModule } from './registers/registers.module';
 import { StoreModule } from './store/store.module';
@@ -37,6 +38,7 @@ import { TransactionModule } from './transaction/transaction.module';
     DashboardModule,
     MultiPackModule,
     PermissionsModule,
+    PurchaseModule,
     RegistersModule,
     StoreModule,
     ProductModule,
