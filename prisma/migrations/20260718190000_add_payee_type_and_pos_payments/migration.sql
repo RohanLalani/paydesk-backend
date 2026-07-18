@@ -1,0 +1,5 @@
+CREATE TYPE "PayeeType" AS ENUM ('VENDOR', 'MISC', 'EXPENSE');
+
+ALTER TABLE "Payee"
+ADD COLUMN "payeeType" "PayeeType" NOT NULL DEFAULT 'VENDOR',
+ADD COLUMN "allowPosPayments" BOOLEAN NOT NULL DEFAULT false;

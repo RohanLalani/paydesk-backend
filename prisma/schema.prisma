@@ -291,6 +291,12 @@ enum PurchaseStatus {
   VOIDED
 }
 
+enum PayeeType {
+  VENDOR
+  MISC
+  EXPENSE
+}
+
 model Staff {
   id              String    @id @default(uuid())
   email           String    @unique
@@ -973,21 +979,23 @@ model Tax {
 }
 
 model Payee {
-  id            String   @id @default(uuid())
-  name          String
-  accountNumber String?
-  contactName   String?
-  email         String?
-  phone         String?
-  addressLine1  String?
-  addressLine2  String?
-  city          String?
-  state         String?
-  postalCode    String?
-  notes         String?
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id               String    @id @default(uuid())
+  name             String
+  accountNumber    String?
+  contactName      String?
+  email            String?
+  phone            String?
+  addressLine1     String?
+  addressLine2     String?
+  city             String?
+  state            String?
+  postalCode       String?
+  notes            String?
+  isActive         Boolean   @default(true)
+  payeeType        PayeeType @default(VENDOR)
+  allowPosPayments Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)

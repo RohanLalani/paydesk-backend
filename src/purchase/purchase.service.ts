@@ -10,6 +10,7 @@ import {
   AuditAction,
   AuditEntityType,
   Prisma,
+  PayeeType,
   PurchaseStatus,
   PurchaseType,
   StorePermissionKey,
@@ -555,6 +556,15 @@ export class PurchaseService {
       postalCode: this.optionalTrimmedText(body.postalCode, 'postalCode'),
       notes: this.optionalTrimmedText(body.notes, 'notes', 1000),
       isActive: this.optionalBoolean(body.isActive, 'isActive', true) ?? true,
+      payeeType:
+        this.optionalEnum(body.payeeType, 'payeeType', PayeeType) ??
+        PayeeType.VENDOR,
+      allowPosPayments:
+        this.optionalBoolean(
+          body.allowPosPayments,
+          'allowPosPayments',
+          false,
+        ) ?? false,
     };
   }
 
@@ -608,6 +618,19 @@ export class PurchaseService {
     }
     if (body.isActive !== undefined) {
       data.isActive = this.requiredBoolean(body.isActive, 'isActive');
+    }
+    if (body.payeeType !== undefined) {
+      data.payeeType = this.requiredEnum(
+        body.payeeType,
+        'payeeType',
+        PayeeType,
+      );
+    }
+    if (body.allowPosPayments !== undefined) {
+      data.allowPosPayments = this.requiredBoolean(
+        body.allowPosPayments,
+        'allowPosPayments',
+      );
     }
 
     return data;
@@ -938,6 +961,8 @@ export class PurchaseService {
       postalCode: payee.postalCode,
       notes: payee.notes,
       isActive: payee.isActive,
+      payeeType: payee.payeeType,
+      allowPosPayments: payee.allowPosPayments,
       createdAt: payee.createdAt,
       updatedAt: payee.updatedAt,
     };
