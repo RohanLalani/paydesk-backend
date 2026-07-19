@@ -73,10 +73,13 @@ type ProductLogRow = {
   categoryId: string | null;
   priceGroupId: string | null;
   changeType: string;
-  fieldChanged: string;
-  fieldKey: string;
-  previousValue: unknown;
-  newValue: unknown;
+  changesSummary: string;
+  changedFields: Array<{
+    field: string;
+    fieldLabel: string;
+    previousValue: unknown;
+    newValue: unknown;
+  }>;
   changedBy: {
     id: string;
     name: string | null;
@@ -288,7 +291,6 @@ export class AuditService {
         'productNumber',
         'productDescription',
         'changeType',
-        'fieldChanged',
         'changedBy',
       ],
       'timestamp',
@@ -326,7 +328,8 @@ export class AuditService {
     });
 
     const rows = events
-      .flatMap((event) => this.productAuditEventToRows(event))
+      .map((event) => this.productAuditEventToRow(event))
+      .filter((row): row is ProductLogRow => row !== null)
       .filter((row) =>
         this.matchesProductLogFilters(row, {
           search,
@@ -457,7 +460,7 @@ export class AuditService {
     return value as T;
   }
 
-  private productAuditEventToRows(
+  private productAuditEventToRow(
     event: Prisma.AuditEventGetPayload<{
       include: {
         actor: {
@@ -465,7 +468,7 @@ export class AuditService {
         };
       };
     }>,
-  ): ProductLogRow[] {
+  ): ProductLogRow | null {
     const before = this.asRecord(event.before);
     const after = this.asRecord(event.after);
     const metadata = this.asRecord(event.metadata);
@@ -473,6 +476,7 @@ export class AuditService {
     const source = this.resolveProductLogSource(metadata);
     const reference = this.resolveProductLogReference(metadata);
     const base = {
+      id: event.id,
       auditEventId: event.id,
       storeId: event.storeId,
       productId: this.stringValue(product.id) ?? event.entityId ?? null,
@@ -498,23 +502,25 @@ export class AuditService {
     };
 
     if (event.action === AuditAction.create) {
-      return [
-        {
-          ...base,
-          id: `${event.id}:created`,
-          changeType: 'Created',
-          fieldChanged: 'Product Record',
-          fieldKey: 'created',
-          previousValue: null,
-          newValue: 'Created',
-        },
-      ];
+      return {
+        ...base,
+        changeType: 'Created',
+        changesSummary: 'Product created',
+        changedFields: [
+          {
+            field: 'created',
+            fieldLabel: 'Product Record',
+            previousValue: null,
+            newValue: 'Created',
+          },
+        ],
+      };
     }
 
     const changes = this.asRecord(event.changes);
-    if (!changes) return [];
+    if (!changes) return null;
 
-    return Object.entries(changes)
+    const changedFields = Object.entries(changes)
       .filter(([key]) => this.isProductAuditField(key))
       .map(([key, value]) => {
         const change = this.asRecord(value);
@@ -526,20 +532,25 @@ export class AuditService {
         const newValue = this.resolveProductAuditValue(key, change?.after, after);
 
         return {
-          ...base,
-          id: `${event.id}:${key}`,
-          changeType: this.resolveProductLogChangeType(
-            key,
-            previousValue,
-            newValue,
-            event.action,
-          ),
-          fieldChanged: PRODUCT_AUDIT_FIELD_LABELS[key] ?? this.humanize(key),
-          fieldKey: key,
+          field: key,
+          fieldLabel: PRODUCT_AUDIT_FIELD_LABELS[key] ?? this.humanize(key),
           previousValue,
           newValue,
         };
       });
+
+    if (!changedFields.length) return null;
+
+    return {
+      ...base,
+      changeType: this.resolveGroupedProductLogChangeType(
+        changedFields.map((change) => change.field),
+        changedFields,
+        event.action,
+      ),
+      changesSummary: this.resolveChangesSummary(changedFields),
+      changedFields,
+    };
   }
 
   private matchesProductLogFilters(
@@ -557,7 +568,12 @@ export class AuditService {
   ) {
     if (filters.source && row.source !== filters.source) return false;
     if (filters.changeType && row.changeType !== filters.changeType) return false;
-    if (filters.field && row.fieldKey !== filters.field) return false;
+    if (
+      filters.field &&
+      !row.changedFields.some((change) => change.field === filters.field)
+    ) {
+      return false;
+    }
     if (filters.changedBy) {
       const actorNeedle = filters.changedBy.toLowerCase();
       const actorText = `${row.changedBy?.name ?? ''} ${row.changedBy?.email ?? ''}`.toLowerCase();
@@ -580,7 +596,8 @@ export class AuditService {
       row.productNumber,
       row.barcode,
       row.productDescription,
-      row.fieldChanged,
+      row.changesSummary,
+      ...row.changedFields.map((change) => change.fieldLabel),
       row.changeType,
       row.changedBy?.name,
       row.changedBy?.email,
@@ -603,7 +620,6 @@ export class AuditService {
       if (sort === 'productNumber') return row.productNumber ?? 0;
       if (sort === 'productDescription') return row.productDescription ?? '';
       if (sort === 'changeType') return row.changeType;
-      if (sort === 'fieldChanged') return row.fieldChanged;
       if (sort === 'changedBy')
         return row.changedBy?.name ?? row.changedBy?.email ?? 'System';
       return row.timestamp.getTime();
@@ -683,6 +699,71 @@ export class AuditService {
     if (previousValue === null && newValue !== null) return 'Updated';
 
     return 'Updated';
+  }
+
+  private resolveGroupedProductLogChangeType(
+    fields: string[],
+    changedFields: Array<{
+      field: string;
+      previousValue: unknown;
+      newValue: unknown;
+    }>,
+    action: AuditAction,
+  ) {
+    if (action === AuditAction.create) return 'Created';
+    if (action === AuditAction.delete) return 'Deleted';
+
+    const fieldSet = new Set(fields);
+    if (fieldSet.has('isActive')) {
+      const statusChange = changedFields.find(
+        (change) => change.field === 'isActive',
+      );
+      if (statusChange?.newValue === true) return 'Activated';
+      if (statusChange?.newValue === false) return 'Deactivated';
+    }
+
+    const categories = new Set(
+      fields.map((field) => this.productLogChangeCategory(field)),
+    );
+    if (categories.size > 1) return 'Multiple Changes';
+    if (categories.has('multipack')) return 'Multipack Change';
+    if (categories.has('price_cost')) return 'Price and Cost Change';
+    if (categories.has('classification')) return 'Classification Change';
+
+    return 'Updated';
+  }
+
+  private productLogChangeCategory(field: string) {
+    if (String(field).toLowerCase().includes('pack')) return 'multipack';
+    if (
+      field === 'unitRetail' ||
+      field === 'onlineRetailPrice' ||
+      field === 'caseCost' ||
+      field === 'unitCost' ||
+      field === 'unitCostAfterDiscountAndRebate'
+    ) {
+      return 'price_cost';
+    }
+    if (
+      field === 'departmentId' ||
+      field === 'productCategoryId' ||
+      field === 'priceGroupId' ||
+      field === 'taxId'
+    ) {
+      return 'classification';
+    }
+
+    return 'general';
+  }
+
+  private resolveChangesSummary(
+    changedFields: Array<{ fieldLabel: string }>,
+  ) {
+    if (changedFields.length <= 3) {
+      return changedFields.map((change) => change.fieldLabel).join(', ');
+    }
+
+    return `${changedFields.length} fields changed`;
   }
 
   private resolveProductLogSource(metadata: Record<string, unknown> | null) {
