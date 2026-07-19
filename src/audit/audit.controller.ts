@@ -24,6 +24,15 @@ export class AuditController {
     return this.auditService.list(storeId, request.user, query);
   }
 
+  @Get('product-logs')
+  listProductLogs(
+    @Param('storeId') storeId: string,
+    @Query() query: Record<string, unknown>,
+    @Request() request: { user: AuthTokenPayload },
+  ) {
+    return this.auditService.listProductLogs(storeId, request.user, query);
+  }
+
   @Get(':eventId')
   get(
     @Param('storeId') storeId: string,
