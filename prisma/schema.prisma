@@ -1022,8 +1022,12 @@ model Purchase {
   rebateAmount    Decimal        @default(0.00) @db.Decimal(14, 2)
   totalCost       Decimal        @default(0.00) @db.Decimal(14, 2)
   marginPercent   Decimal?       @db.Decimal(8, 4)
+  manualCost      Decimal        @default(0.00) @db.Decimal(14, 2)
+  manualRetail    Decimal        @default(0.00) @db.Decimal(14, 2)
+  manualMargin    Decimal?       @db.Decimal(8, 4)
   referenceNumber String?
   notes           String?
+  inventoryPostedAt DateTime?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
 
@@ -1040,6 +1044,7 @@ model Purchase {
   updatedByActor   Staff?  @relation("PurchaseUpdatedBy", fields: [updatedByActorId], references: [id], onDelete: SetNull)
 
   items PurchaseItem[]
+  expenses PurchaseExpense[]
 
   @@unique([storeId, purchaseNumber])
   @@unique([storeId, payeeId, invoiceNumber])
@@ -1054,7 +1059,16 @@ model PurchaseItem {
   id                    String   @id @default(uuid())
   purchaseId            String
   productId             String
+  departmentId          String?
+  priceGroupId          String?
+  categoryId            String?
   quantity              Int
+  unitsPerCase          Int      @default(1)
+  caseCost              Decimal  @default(0.00) @db.Decimal(14, 2)
+  caseDiscount          Decimal  @default(0.00) @db.Decimal(14, 2)
+  rebate                Decimal  @default(0.00) @db.Decimal(14, 2)
+  entryType             String   @default("purchase")
+  source                String?
   unitCost              Decimal  @db.Decimal(14, 4)
   extendedCost          Decimal  @db.Decimal(14, 2)
   unitRetailSnapshot    Decimal  @db.Decimal(14, 2)
@@ -1070,6 +1084,22 @@ model PurchaseItem {
 
   @@index([purchaseId])
   @@index([productId, purchaseId])
+  @@index([departmentId])
+}
+
+model PurchaseExpense {
+  id           String   @id @default(uuid())
+  purchaseId   String
+  description  String
+  amount       Decimal  @db.Decimal(14, 2)
+  departmentId String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseId])
+  @@index([departmentId])
 }
 
 model Customer {

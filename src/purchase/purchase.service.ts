@@ -9,6 +9,7 @@ import {
 import {
   AuditAction,
   AuditEntityType,
+  InventoryActionType,
   Prisma,
   PayeeType,
   PurchaseStatus,
@@ -279,12 +280,30 @@ export class PurchaseService {
       StorePermissionKey.manage_purchases,
     );
     const dto = this.parseCreatePurchaseBody(body);
-    const payee = await this.ensureActivePayeeInStore(dto.payeeId, storeId);
-    const itemInputs = await this.resolvePurchaseItems(storeId, dto.items);
-    const totals = this.calculatePurchaseTotals(itemInputs, dto.amounts);
 
     try {
       const created = await this.prisma.$transaction(async (tx) => {
+        const payee = await this.ensureActivePayeeInStoreTx(
+          tx,
+          dto.payeeId,
+          storeId,
+        );
+        const itemInputs = await this.resolvePurchaseItems(
+          tx,
+          storeId,
+          dto.items,
+        );
+        await this.ensureDepartmentsInStoreTx(tx, storeId, [
+          dto.manualEntry.departmentId,
+          ...itemInputs.map((item) => item.departmentId),
+          ...dto.expenses.map((expense) => expense.departmentId),
+        ]);
+        const totals = this.calculatePurchaseTotals(
+          itemInputs,
+          dto.expenses,
+          dto.manualEntry,
+          dto.amounts,
+        );
         const store = await tx.store.update({
           where: { id: storeId },
           data: { nextPurchaseNumber: { increment: 1 } },
@@ -301,6 +320,9 @@ export class PurchaseService {
             purchaseDate: dto.purchaseDate,
             type: dto.type,
             status: dto.status,
+            manualCost: dto.manualEntry.cost,
+            manualRetail: dto.manualEntry.retail,
+            manualMargin: dto.manualEntry.margin,
             referenceNumber: dto.referenceNumber,
             notes: dto.notes,
             freightAmount: totals.freightAmount,
@@ -318,7 +340,16 @@ export class PurchaseService {
               ? {
                   create: itemInputs.map((item) => ({
                     productId: item.productId,
+                    departmentId: item.departmentId,
+                    priceGroupId: item.priceGroupId,
+                    categoryId: item.categoryId,
                     quantity: item.quantity,
+                    unitsPerCase: item.unitsPerCase,
+                    caseCost: item.caseCost,
+                    caseDiscount: item.caseDiscount,
+                    rebate: item.rebate,
+                    entryType: item.entryType,
+                    source: item.source,
                     unitCost: item.unitCost,
                     extendedCost: item.extendedCost,
                     unitRetailSnapshot: item.unitRetailSnapshot,
@@ -329,9 +360,23 @@ export class PurchaseService {
                   })),
                 }
               : undefined,
+            expenses: dto.expenses.length
+              ? {
+                  create: dto.expenses.map((expense) => ({
+                    description: expense.description,
+                    amount: expense.amount,
+                    departmentId: expense.departmentId,
+                  })),
+                }
+              : undefined,
           },
           include: this.purchaseDetailInclude,
         });
+
+        const next =
+          purchase.status === PurchaseStatus.DRAFT
+            ? purchase
+            : await this.postPurchaseInventory(tx, storeId, purchase, user);
 
         await this.audit.record(tx, {
           storeId,
@@ -339,13 +384,13 @@ export class PurchaseService {
           ownerId: user.type === 'owner' ? user.accountId : null,
           action: AuditAction.create,
           entityType: AuditEntityType.purchase,
-          entityId: purchase.id,
-          entityName: purchase.invoiceNumber,
-          summary: `Created purchase ${purchase.invoiceNumber}`,
-          after: purchase,
+          entityId: next.id,
+          entityName: next.invoiceNumber,
+          summary: `Created purchase ${next.invoiceNumber}`,
+          after: next,
         });
 
-        return purchase;
+        return next;
       });
 
       return this.serializePurchaseDetail(created);
@@ -388,44 +433,91 @@ export class PurchaseService {
       user,
       StorePermissionKey.manage_purchases,
     );
-    if (body.items !== undefined) {
-      throw new BadRequestException(
-        'Purchase item editing is not available yet',
-      );
-    }
-
-    const purchase = await this.prisma.purchase.findFirst({
-      where: { id: purchaseId, storeId },
-      include: this.purchaseDetailInclude,
-    });
-
-    if (!purchase) {
-      throw new NotFoundException('Purchase not found');
-    }
-
     const data = this.parseUpdatePurchaseBody(body);
-    const payeeId = data.payeeId ?? purchase.payeeId;
-
-    if (data.payeeId) {
-      await this.ensureActivePayeeInStore(data.payeeId, storeId);
-    }
-
-    const totalCost = this.calculateTotalCost(
-      purchase.costSubtotal,
-      data.freightAmount ?? purchase.freightAmount,
-      data.feeAmount ?? purchase.feeAmount,
-      data.taxAmount ?? purchase.taxAmount,
-      data.discountAmount ?? purchase.discountAmount,
-      data.rebateAmount ?? purchase.rebateAmount,
-    );
-    const marginPercent = this.calculateMarginDecimal(
-      purchase.retailTotal,
-      totalCost,
-    );
 
     try {
       const updated = await this.prisma.$transaction(async (tx) => {
-        const next = await tx.purchase.update({
+        const purchase = await tx.purchase.findFirst({
+          where: { id: purchaseId, storeId },
+          include: this.purchaseDetailInclude,
+        });
+
+        if (!purchase) {
+          throw new NotFoundException('Purchase not found');
+        }
+
+        if (
+          purchase.status === PurchaseStatus.VERIFIED ||
+          purchase.status === PurchaseStatus.VOIDED
+        ) {
+          throw new BadRequestException(
+            `${this.purchaseStatusLabel(purchase.status)} purchases cannot be edited`,
+          );
+        }
+
+        if (
+          data.updatedAt &&
+          new Date(data.updatedAt).getTime() !== purchase.updatedAt.getTime()
+        ) {
+          throw new ConflictException(
+            'This purchase has changed since it was opened. Refresh and try again.',
+          );
+        }
+
+        const payeeId = data.payeeId ?? purchase.payeeId;
+        if (data.payeeId) {
+          await this.ensureActivePayeeInStoreTx(tx, data.payeeId, storeId);
+        }
+
+        const nextManualEntry = data.manualEntry ?? {
+          cost: purchase.manualCost,
+          retail: purchase.manualRetail,
+          margin: purchase.manualMargin,
+          departmentId: null,
+        };
+        const nextExpenses =
+          data.expenses ??
+          purchase.expenses.map((expense) => ({
+            description: expense.description,
+            amount: expense.amount,
+            departmentId: expense.departmentId,
+          }));
+        const nextItemInputs =
+          data.items === undefined
+            ? this.purchaseItemsToInputs(purchase.items)
+            : await this.resolvePurchaseItems(tx, storeId, data.items);
+
+        await this.ensureDepartmentsInStoreTx(tx, storeId, [
+          nextManualEntry.departmentId,
+          ...nextItemInputs.map((item) => item.departmentId),
+          ...nextExpenses.map((expense) => expense.departmentId),
+        ]);
+
+        const amounts = {
+          freightAmount: data.freightAmount ?? purchase.freightAmount,
+          feeAmount: data.feeAmount ?? purchase.feeAmount,
+          taxAmount: data.taxAmount ?? purchase.taxAmount,
+          discountAmount: data.discountAmount ?? purchase.discountAmount,
+          rebateAmount: data.rebateAmount ?? purchase.rebateAmount,
+        };
+        const totals = this.calculatePurchaseTotals(
+          nextItemInputs,
+          nextExpenses,
+          nextManualEntry,
+          amounts,
+        );
+        const nextStatus = data.status ?? purchase.status;
+        const wasPosted = purchase.inventoryPostedAt !== null;
+        const shouldBePosted = nextStatus !== PurchaseStatus.DRAFT;
+
+        if (data.items !== undefined) {
+          await tx.purchaseItem.deleteMany({ where: { purchaseId } });
+        }
+        if (data.expenses !== undefined) {
+          await tx.purchaseExpense.deleteMany({ where: { purchaseId } });
+        }
+
+        await tx.purchase.update({
           where: { id: purchaseId },
           data: {
             ...(data.invoiceNumber === undefined
@@ -441,6 +533,9 @@ export class PurchaseService {
               : { referenceNumber: data.referenceNumber }),
             ...(data.notes === undefined ? {} : { notes: data.notes }),
             ...(data.payeeId === undefined ? {} : { payeeId }),
+            manualCost: nextManualEntry.cost,
+            manualRetail: nextManualEntry.retail,
+            manualMargin: nextManualEntry.margin,
             ...(data.freightAmount === undefined
               ? {}
               : { freightAmount: data.freightAmount }),
@@ -456,12 +551,81 @@ export class PurchaseService {
             ...(data.rebateAmount === undefined
               ? {}
               : { rebateAmount: data.rebateAmount }),
-            totalCost,
-            marginPercent,
+            costSubtotal: totals.costSubtotal,
+            retailTotal: totals.retailTotal,
+            totalCost: totals.totalCost,
+            marginPercent: totals.marginPercent,
+            ...(wasPosted && !shouldBePosted
+              ? { inventoryPostedAt: null }
+              : {}),
             updatedByActorId: user.staffId,
+            ...(data.items === undefined
+              ? {}
+              : {
+                  items: {
+                    create: nextItemInputs.map((item) => ({
+                      productId: item.productId,
+                      departmentId: item.departmentId,
+                      priceGroupId: item.priceGroupId,
+                      categoryId: item.categoryId,
+                      quantity: item.quantity,
+                      unitsPerCase: item.unitsPerCase,
+                      caseCost: item.caseCost,
+                      caseDiscount: item.caseDiscount,
+                      rebate: item.rebate,
+                      entryType: item.entryType,
+                      source: item.source,
+                      unitCost: item.unitCost,
+                      extendedCost: item.extendedCost,
+                      unitRetailSnapshot: item.unitRetailSnapshot,
+                      extendedRetail: item.extendedRetail,
+                      productNumberSnapshot: item.productNumberSnapshot,
+                      barcodeSnapshot: item.barcodeSnapshot,
+                      productNameSnapshot: item.productNameSnapshot,
+                    })),
+                  },
+                }),
+            ...(data.expenses === undefined
+              ? {}
+              : {
+                  expenses: {
+                    create: nextExpenses.map((expense) => ({
+                      description: expense.description,
+                      amount: expense.amount,
+                      departmentId: expense.departmentId,
+                    })),
+                  },
+                }),
           },
+        });
+
+        let next = await tx.purchase.findUniqueOrThrow({
+          where: { id: purchaseId },
           include: this.purchaseDetailInclude,
         });
+
+        if (wasPosted || shouldBePosted) {
+          await this.applyInventoryDelta(
+            tx,
+            storeId,
+            purchaseId,
+            wasPosted
+              ? this.inventoryEffectsFromItems(purchase.items)
+              : new Map<string, number>(),
+            shouldBePosted
+              ? this.inventoryEffectsFromItems(next.items)
+              : new Map<string, number>(),
+            user,
+          );
+
+          if (!wasPosted && shouldBePosted) {
+            next = await tx.purchase.update({
+              where: { id: purchaseId },
+              data: { inventoryPostedAt: new Date() },
+              include: this.purchaseDetailInclude,
+            });
+          }
+        }
 
         await this.audit.record(tx, {
           storeId,
@@ -537,6 +701,160 @@ export class PurchaseService {
     }
 
     return payee;
+  }
+
+  private async ensureActivePayeeInStoreTx(
+    tx: Prisma.TransactionClient,
+    payeeId: string,
+    storeId: string,
+  ) {
+    const payee = await tx.payee.findFirst({
+      where: { id: payeeId, storeId },
+    });
+
+    if (!payee) {
+      throw new BadRequestException(
+        'payeeId must belong to the selected store',
+      );
+    }
+
+    if (!payee.isActive) {
+      throw new BadRequestException('Selected payee must be active');
+    }
+
+    return payee;
+  }
+
+  private async ensureDepartmentsInStoreTx(
+    tx: Prisma.TransactionClient,
+    storeId: string,
+    departmentIds: Array<string | null | undefined>,
+  ) {
+    const uniqueIds = [...new Set(departmentIds.filter(Boolean))] as string[];
+
+    if (!uniqueIds.length) {
+      return;
+    }
+
+    const count = await tx.department.count({
+      where: { storeId, id: { in: uniqueIds } },
+    });
+
+    if (count !== uniqueIds.length) {
+      throw new BadRequestException(
+        'One or more departments do not belong to the selected store',
+      );
+    }
+  }
+
+  private async postPurchaseInventory(
+    tx: Prisma.TransactionClient,
+    storeId: string,
+    purchase: Prisma.PurchaseGetPayload<{
+      include: PurchaseService['purchaseDetailInclude'];
+    }>,
+    user: AuthTokenPayload,
+  ) {
+    await this.applyInventoryDelta(
+      tx,
+      storeId,
+      purchase.id,
+      new Map<string, number>(),
+      this.inventoryEffectsFromItems(purchase.items),
+      user,
+    );
+
+    return tx.purchase.update({
+      where: { id: purchase.id },
+      data: { inventoryPostedAt: new Date() },
+      include: this.purchaseDetailInclude,
+    });
+  }
+
+  private inventoryEffectsFromItems(
+    items: Array<{
+      productId: string;
+      quantity: number;
+      unitsPerCase: number;
+      entryType: string;
+    }>,
+  ) {
+    return items.reduce<Map<string, number>>((effects, item) => {
+      const direction = item.entryType === 'return' ? -1 : 1;
+      const quantityDelta = direction * item.quantity * item.unitsPerCase;
+      effects.set(
+        item.productId,
+        (effects.get(item.productId) ?? 0) + quantityDelta,
+      );
+      return effects;
+    }, new Map<string, number>());
+  }
+
+  private async applyInventoryDelta(
+    tx: Prisma.TransactionClient,
+    storeId: string,
+    purchaseId: string,
+    before: Map<string, number>,
+    after: Map<string, number>,
+    user: AuthTokenPayload,
+  ) {
+    const productIds = [...new Set([...before.keys(), ...after.keys()])];
+
+    for (const productId of productIds) {
+      const quantityChanged =
+        (after.get(productId) ?? 0) - (before.get(productId) ?? 0);
+
+      if (quantityChanged === 0) {
+        continue;
+      }
+
+      const product = await tx.product.findFirst({
+        where: { id: productId, storeId },
+        select: {
+          id: true,
+          currentQuantity: true,
+          allowNegativeInventory: true,
+          name: true,
+        },
+      });
+
+      if (!product) {
+        throw new BadRequestException(
+          `Product ${productId} does not belong to the selected store`,
+        );
+      }
+
+      const quantityAfter = product.currentQuantity + quantityChanged;
+
+      if (quantityAfter < 0 && !product.allowNegativeInventory) {
+        throw new BadRequestException(
+          `Inventory for ${product.name} cannot go below zero`,
+        );
+      }
+
+      await tx.product.update({
+        where: { id: product.id },
+        data: { currentQuantity: quantityAfter },
+      });
+
+      await tx.inventoryLog.create({
+        data: {
+          storeId,
+          productId: product.id,
+          performedByStaffId: user.staffId,
+          actionType:
+            quantityChanged >= 0
+              ? InventoryActionType.receive
+              : InventoryActionType.return,
+          quantityBefore: product.currentQuantity,
+          quantityChanged,
+          quantityAfter,
+          reason: quantityChanged >= 0 ? 'purchase_receipt' : 'purchase_return',
+          referenceType: 'purchase',
+          referenceId: purchaseId,
+        },
+      });
+    }
   }
 
   private parseCreatePayeeBody(body: Record<string, unknown>) {
@@ -663,7 +981,9 @@ export class PurchaseService {
         ),
         rebateAmount: this.optionalDecimal(body.rebateAmount, 'rebateAmount'),
       },
-      items: this.parsePurchaseItems(body.items),
+      manualEntry: this.parseManualEntry(body.manualEntry),
+      items: this.parsePurchaseItems(body.items ?? body.lineItems),
+      expenses: this.parsePurchaseExpenses(body.expenses),
     };
   }
 
@@ -717,6 +1037,51 @@ export class PurchaseService {
         body.rebateAmount === undefined
           ? undefined
           : this.optionalDecimal(body.rebateAmount, 'rebateAmount'),
+      manualEntry:
+        body.manualEntry === undefined
+          ? undefined
+          : this.parseManualEntry(body.manualEntry),
+      items:
+        body.items === undefined && body.lineItems === undefined
+          ? undefined
+          : this.parsePurchaseItems(body.items ?? body.lineItems),
+      expenses:
+        body.expenses === undefined
+          ? undefined
+          : this.parsePurchaseExpenses(body.expenses),
+      updatedAt:
+        body.updatedAt === undefined
+          ? undefined
+          : this.requiredString(body.updatedAt, 'updatedAt'),
+    };
+  }
+
+  private parseManualEntry(value: unknown) {
+    if (value === undefined || value === null) {
+      return {
+        cost: new Prisma.Decimal(0),
+        retail: new Prisma.Decimal(0),
+        margin: null,
+        departmentId: null,
+      };
+    }
+
+    if (!this.isObject(value)) {
+      throw new BadRequestException('manualEntry must be an object');
+    }
+
+    return {
+      cost: this.optionalDecimal(value.cost, 'manualEntry.cost'),
+      retail: this.optionalDecimal(value.retail, 'manualEntry.retail'),
+      margin:
+        value.margin === undefined ||
+        value.margin === null ||
+        value.margin === ''
+          ? null
+          : this.requiredDecimal(value.margin, 'manualEntry.margin', 4),
+      departmentId:
+        this.optionalString(value.departmentId, 'manualEntry.departmentId') ??
+        null,
     };
   }
 
@@ -734,43 +1099,168 @@ export class PurchaseService {
         throw new BadRequestException(`items.${index} must be an object`);
       }
 
+      const quantity = this.requiredPositiveInt(
+        item.quantity,
+        `items.${index}.quantity`,
+      );
+      const unitsPerCase =
+        this.optionalPositiveInt(
+          item.unitsPerCase,
+          `items.${index}.unitsPerCase`,
+        ) ?? 1;
+      const caseCost = this.optionalDecimal(
+        item.caseCost,
+        `items.${index}.caseCost`,
+      );
+      const caseDiscount = this.optionalDecimal(
+        item.caseDiscount,
+        `items.${index}.caseDiscount`,
+      );
+      const rebate = this.optionalDecimal(item.rebate, `items.${index}.rebate`);
+      const directUnitCost =
+        item.unitCost === undefined ||
+        item.unitCost === null ||
+        item.unitCost === ''
+          ? null
+          : this.requiredDecimal(item.unitCost, `items.${index}.unitCost`, 4);
+      const unitRetailSnapshot =
+        item.unitRetailSnapshot !== undefined
+          ? this.requiredDecimal(
+              item.unitRetailSnapshot,
+              `items.${index}.unitRetailSnapshot`,
+              2,
+            )
+          : item.newRetail !== undefined
+            ? this.optionalDecimal(item.newRetail, `items.${index}.newRetail`)
+            : this.optionalDecimal(
+                item.currentRetail,
+                `items.${index}.currentRetail`,
+              );
+      const entryType =
+        this.optionalString(item.entryType, `items.${index}.entryType`) ??
+        'purchase';
+
+      if (entryType !== 'purchase' && entryType !== 'return') {
+        throw new BadRequestException(
+          `items.${index}.entryType must be purchase or return`,
+        );
+      }
+
       return {
         productId: this.requiredString(
           item.productId,
           `items.${index}.productId`,
         ),
-        quantity: this.requiredPositiveInt(
-          item.quantity,
-          `items.${index}.quantity`,
-        ),
-        unitCost: this.requiredDecimal(
-          item.unitCost,
-          `items.${index}.unitCost`,
-          4,
-        ),
-        unitRetailSnapshot: this.requiredDecimal(
-          item.unitRetailSnapshot,
-          `items.${index}.unitRetailSnapshot`,
-          2,
-        ),
+        departmentId:
+          this.optionalString(
+            item.departmentId,
+            `items.${index}.departmentId`,
+          ) ?? null,
+        priceGroupId:
+          this.optionalString(
+            item.priceGroupId,
+            `items.${index}.priceGroupId`,
+          ) ?? null,
+        categoryId:
+          this.optionalString(item.categoryId, `items.${index}.categoryId`) ??
+          null,
+        quantity,
+        unitsPerCase,
+        caseCost,
+        caseDiscount,
+        rebate,
+        unitCost: directUnitCost,
+        unitRetailSnapshot,
+        entryType,
+        source:
+          this.optionalString(item.source, `items.${index}.source`) ?? null,
       };
     });
   }
 
+  private parsePurchaseExpenses(value: unknown) {
+    if (value === undefined || value === null) {
+      return [];
+    }
+
+    if (!Array.isArray(value)) {
+      throw new BadRequestException('expenses must be an array');
+    }
+
+    return value
+      .map((expense, index) => {
+        if (!this.isObject(expense)) {
+          throw new BadRequestException(`expenses.${index} must be an object`);
+        }
+
+        return {
+          description: this.requiredString(
+            expense.description,
+            `expenses.${index}.description`,
+          ),
+          amount: this.optionalDecimal(
+            expense.amount,
+            `expenses.${index}.amount`,
+          ),
+          departmentId:
+            this.optionalString(
+              expense.departmentId,
+              `expenses.${index}.departmentId`,
+            ) ?? null,
+        };
+      })
+      .filter((expense) => !expense.amount.equals(0) || expense.description);
+  }
+
+  private purchaseItemsToInputs(
+    items: Array<{
+      productId: string;
+      departmentId: string | null;
+      priceGroupId: string | null;
+      categoryId: string | null;
+      quantity: number;
+      unitsPerCase: number;
+      caseCost: Prisma.Decimal;
+      caseDiscount: Prisma.Decimal;
+      rebate: Prisma.Decimal;
+      unitCost: Prisma.Decimal;
+      unitRetailSnapshot: Prisma.Decimal;
+      entryType: string;
+      source: string | null;
+      extendedCost: Prisma.Decimal;
+      extendedRetail: Prisma.Decimal;
+      productNumberSnapshot: number | null;
+      barcodeSnapshot: string | null;
+      productNameSnapshot: string | null;
+    }>,
+  ) {
+    return items.map((item) => ({ ...item }));
+  }
+
   private async resolvePurchaseItems(
+    tx: Prisma.TransactionClient,
     storeId: string,
     items: Array<{
       productId: string;
+      departmentId: string | null;
+      priceGroupId: string | null;
+      categoryId: string | null;
       quantity: number;
-      unitCost: Prisma.Decimal;
+      unitsPerCase: number;
+      caseCost: Prisma.Decimal;
+      caseDiscount: Prisma.Decimal;
+      rebate: Prisma.Decimal;
+      unitCost: Prisma.Decimal | null;
       unitRetailSnapshot: Prisma.Decimal;
+      entryType: string;
+      source: string | null;
     }>,
   ) {
     if (!items.length) {
       return [];
     }
 
-    const products = await this.prisma.product.findMany({
+    const products = await tx.product.findMany({
       where: {
         storeId,
         id: { in: items.map((item) => item.productId) },
@@ -796,11 +1286,20 @@ export class PurchaseService {
         );
       }
 
-      const extendedCost = item.unitCost.mul(item.quantity);
-      const extendedRetail = item.unitRetailSnapshot.mul(item.quantity);
+      const rawDiscountedCaseCost = item.caseCost.minus(item.caseDiscount);
+      const discountedCaseCost = rawDiscountedCaseCost.lessThan(0)
+        ? new Prisma.Decimal(0)
+        : rawDiscountedCaseCost;
+      const unitCost =
+        item.unitCost ?? discountedCaseCost.div(item.unitsPerCase);
+      const extendedCost = discountedCaseCost.mul(item.quantity);
+      const extendedRetail = item.unitRetailSnapshot
+        .mul(item.quantity)
+        .mul(item.unitsPerCase);
 
       return {
         ...item,
+        unitCost,
         extendedCost,
         extendedRetail,
         productNumberSnapshot: product.productNumber,
@@ -812,12 +1311,15 @@ export class PurchaseService {
 
   private calculatePurchaseTotals(
     items: Array<{
-      quantity: number;
-      unitCost: Prisma.Decimal;
-      unitRetailSnapshot: Prisma.Decimal;
       extendedCost: Prisma.Decimal;
       extendedRetail: Prisma.Decimal;
     }>,
+    expenses: Array<{ amount: Prisma.Decimal }>,
+    manualEntry: {
+      cost: Prisma.Decimal;
+      retail: Prisma.Decimal;
+      margin: Prisma.Decimal | null;
+    },
     amounts: {
       freightAmount: Prisma.Decimal;
       feeAmount: Prisma.Decimal;
@@ -828,14 +1330,18 @@ export class PurchaseService {
   ) {
     const costSubtotal = items.reduce(
       (sum, item) => sum.plus(item.extendedCost),
-      new Prisma.Decimal(0),
+      manualEntry.cost,
     );
     const retailTotal = items.reduce(
       (sum, item) => sum.plus(item.extendedRetail),
+      manualEntry.retail,
+    );
+    const expenseTotal = expenses.reduce(
+      (sum, expense) => sum.plus(expense.amount),
       new Prisma.Decimal(0),
     );
     const totalCost = this.calculateTotalCost(
-      costSubtotal,
+      costSubtotal.plus(expenseTotal),
       amounts.freightAmount,
       amounts.feeAmount,
       amounts.taxAmount,
@@ -1018,16 +1524,37 @@ export class PurchaseService {
       discountAmount: purchase.discountAmount.toFixed(2),
       rebateAmount: purchase.rebateAmount.toFixed(2),
       totalCost: purchase.totalCost.toFixed(2),
+      manualEntry: {
+        cost: purchase.manualCost.toFixed(2),
+        retail: purchase.manualRetail.toFixed(2),
+        margin:
+          purchase.manualMargin === null
+            ? null
+            : purchase.manualMargin.toFixed(2),
+      },
       marginPercent:
         purchase.marginPercent === null
           ? null
           : purchase.marginPercent.toFixed(2),
       lineCount: purchase.items.length,
-      totalUnits: purchase.items.reduce((sum, item) => sum + item.quantity, 0),
+      inventoryPostedAt: purchase.inventoryPostedAt,
+      totalUnits: purchase.items.reduce(
+        (sum, item) => sum + item.quantity * item.unitsPerCase,
+        0,
+      ),
       items: purchase.items.map((item) => ({
         id: item.id,
         productId: item.productId,
+        departmentId: item.departmentId,
+        priceGroupId: item.priceGroupId,
+        categoryId: item.categoryId,
         quantity: item.quantity,
+        unitsPerCase: item.unitsPerCase,
+        caseCost: item.caseCost.toFixed(2),
+        caseDiscount: item.caseDiscount.toFixed(2),
+        rebate: item.rebate.toFixed(2),
+        entryType: item.entryType,
+        source: item.source,
         unitCost: item.unitCost.toFixed(4),
         extendedCost: item.extendedCost.toFixed(2),
         unitRetailSnapshot: item.unitRetailSnapshot.toFixed(2),
@@ -1041,6 +1568,12 @@ export class PurchaseService {
           barcode: item.product.barcode,
           name: item.product.name,
         },
+      })),
+      expenses: purchase.expenses.map((expense) => ({
+        id: expense.id,
+        description: expense.description,
+        amount: expense.amount.toFixed(2),
+        departmentId: expense.departmentId,
       })),
       createdBy:
         purchase.createdByActor === null
@@ -1337,6 +1870,14 @@ export class PurchaseService {
     return this.requiredPositiveInt(value, field);
   }
 
+  private optionalPositiveInt(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    return this.requiredPositiveInt(value, field);
+  }
+
   private requiredDecimal(value: unknown, field: string, maxScale: number) {
     if (
       typeof value !== 'number' &&
@@ -1400,6 +1941,9 @@ export class PurchaseService {
 
   private readonly purchaseDetailInclude = {
     payee: true,
+    expenses: {
+      orderBy: [{ createdAt: 'asc' }],
+    },
     items: {
       include: {
         product: {
