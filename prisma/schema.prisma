@@ -192,6 +192,8 @@ enum AuditAction {
   multi_pack_updated
   multi_pack_deactivated
   multi_pack_reactivated
+  pause
+  archive
 }
 
 enum AuditEntityType {
@@ -217,6 +219,43 @@ enum AuditEntityType {
   multi_pack
   multi_pack_proposal
   multi_pack_batch
+  promotion
+}
+
+enum PromotionType {
+  BUY_X_GET_Y_FREE
+  BUY_X_GET_Y_PERCENT_OFF
+  BUY_X_GET_Y_FIXED_PRICE
+  QUANTITY_BUNDLE_PRICE
+  QUANTITY_PERCENT_OFF
+  FIXED_AMOUNT_OFF_ITEM
+  PERCENT_OFF_ITEM
+  FIXED_AMOUNT_OFF_GROUP
+  MIX_AND_MATCH_BUNDLE
+  SPEND_THRESHOLD_FIXED_OFF
+  SPEND_THRESHOLD_PERCENT_OFF
+  CUSTOM_PRICE
+}
+
+enum PromotionStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  PAUSED
+  EXPIRED
+  INACTIVE
+  ARCHIVED
+}
+
+enum PromotionConflictStrategy {
+  PRIORITY
+  BEST_CUSTOMER_DISCOUNT
+  BEST_STORE_MARGIN
+}
+
+enum PromotionProductRole {
+  QUALIFYING
+  REWARD
 }
 
 enum MultiPackType {
@@ -270,6 +309,10 @@ enum StorePermissionKey {
   view_reports
   process_sales
   override_prices
+  view_promotions
+  manage_promotions
+  activate_promotions
+  override_promotions
 }
 
 enum RegisterStatus {
@@ -319,6 +362,8 @@ model Staff {
   createdRegisterActivationCodes RegisterActivationCode[]
   purchasesCreated               Purchase[]               @relation("PurchaseCreatedBy")
   purchasesUpdated               Purchase[]               @relation("PurchaseUpdatedBy")
+  promotionsCreated              Promotion[]              @relation("PromotionCreatedBy")
+  promotionsUpdated              Promotion[]              @relation("PromotionUpdatedBy")
 }
 
 model PasswordResetToken {
@@ -459,6 +504,7 @@ model Store {
   features                StoreFeature[]
   serviceSubscriptions    StoreServiceSubscription[]
   auditEvents             AuditEvent[]
+  promotions              Promotion[]
 
   @@index([ownerId, isActive])
 }
@@ -754,12 +800,13 @@ model Product {
   taxId String
   tax   Tax    @relation(fields: [taxId], references: [id])
 
-  inventoryLogs      InventoryLog[]
-  transactionItems   TransactionItem[]
-  purchaseItems      PurchaseItem[]
-  cartItems          CartItem[]
-  multiPacks         ProductMultiPack[]
-  multiPackProposals MultiPackProposal[]
+  inventoryLogs        InventoryLog[]
+  transactionItems     TransactionItem[]
+  purchaseItems        PurchaseItem[]
+  cartItems            CartItem[]
+  multiPacks           ProductMultiPack[]
+  multiPackProposals   MultiPackProposal[]
+  promotionAssignments PromotionProduct[]
 
   @@unique([storeId, barcode])
   @@unique([storeId, productNumber])
@@ -775,6 +822,67 @@ model Product {
   @@index([priceGroupId])
   @@index([productCategoryId])
   @@index([taxId])
+}
+
+model Promotion {
+  id                                  String                    @id @default(uuid())
+  storeId                             String
+  name                                String
+  description                         String?
+  type                                PromotionType
+  status                              PromotionStatus           @default(DRAFT)
+  startAt                             DateTime?
+  endAt                               DateTime?
+  priority                            Int                       @default(0)
+  stackable                           Boolean                   @default(false)
+  conflictStrategy                    PromotionConflictStrategy @default(PRIORITY)
+  allowCashierOverride                Boolean                   @default(false)
+  requireManagerApproval              Boolean                   @default(false)
+  applyAutomatically                  Boolean                   @default(true)
+  printOnReceipt                      Boolean                   @default(true)
+  displayAtPos                        Boolean                   @default(true)
+  stopLowerPriority                   Boolean                   @default(false)
+  excludePriceOverrides               Boolean                   @default(true)
+  allowRepeatedApplications           Boolean                   @default(true)
+  maxApplicationsPerTransaction       Int?
+  maxDiscountedQuantityPerTransaction Int?
+  limitOneUsePerCustomer              Boolean                   @default(false)
+  loyaltyRequired                     Boolean                   @default(false)
+  allowEbtProducts                    Boolean                   @default(true)
+  applyBeforeTax                      Boolean                   @default(true)
+  useSeparateRewardProducts           Boolean                   @default(false)
+  configuration                       Json
+  internalNotes                       String?
+  createdByActorId                    String
+  updatedByActorId                    String
+  createdAt                           DateTime                  @default(now())
+  updatedAt                           DateTime                  @updatedAt
+  archivedAt                          DateTime?
+
+  store     Store              @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  createdBy Staff              @relation("PromotionCreatedBy", fields: [createdByActorId], references: [id])
+  updatedBy Staff              @relation("PromotionUpdatedBy", fields: [updatedByActorId], references: [id])
+  products  PromotionProduct[]
+
+  @@index([storeId, status])
+  @@index([storeId, startAt, endAt])
+  @@index([storeId, type])
+  @@index([storeId, updatedAt])
+}
+
+model PromotionProduct {
+  id          String               @id @default(uuid())
+  promotionId String
+  productId   String
+  role        PromotionProductRole @default(QUALIFYING)
+  createdAt   DateTime             @default(now())
+
+  promotion Promotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([promotionId, productId, role])
+  @@index([promotionId, role])
+  @@index([productId])
 }
 
 model ProductMultiPack {
@@ -1007,29 +1115,29 @@ model Payee {
 }
 
 model Purchase {
-  id              String         @id @default(uuid())
-  purchaseNumber  Int
-  invoiceNumber   String
-  purchaseDate    DateTime
-  type            PurchaseType
-  status          PurchaseStatus @default(DRAFT)
-  costSubtotal    Decimal        @default(0.00) @db.Decimal(14, 2)
-  retailTotal     Decimal        @default(0.00) @db.Decimal(14, 2)
-  freightAmount   Decimal        @default(0.00) @db.Decimal(14, 2)
-  feeAmount       Decimal        @default(0.00) @db.Decimal(14, 2)
-  taxAmount       Decimal        @default(0.00) @db.Decimal(14, 2)
-  discountAmount  Decimal        @default(0.00) @db.Decimal(14, 2)
-  rebateAmount    Decimal        @default(0.00) @db.Decimal(14, 2)
-  totalCost       Decimal        @default(0.00) @db.Decimal(14, 2)
-  marginPercent   Decimal?       @db.Decimal(8, 4)
-  manualCost      Decimal        @default(0.00) @db.Decimal(14, 2)
-  manualRetail    Decimal        @default(0.00) @db.Decimal(14, 2)
-  manualMargin    Decimal?       @db.Decimal(8, 4)
-  referenceNumber String?
-  notes           String?
+  id                String         @id @default(uuid())
+  purchaseNumber    Int
+  invoiceNumber     String
+  purchaseDate      DateTime
+  type              PurchaseType
+  status            PurchaseStatus @default(DRAFT)
+  costSubtotal      Decimal        @default(0.00) @db.Decimal(14, 2)
+  retailTotal       Decimal        @default(0.00) @db.Decimal(14, 2)
+  freightAmount     Decimal        @default(0.00) @db.Decimal(14, 2)
+  feeAmount         Decimal        @default(0.00) @db.Decimal(14, 2)
+  taxAmount         Decimal        @default(0.00) @db.Decimal(14, 2)
+  discountAmount    Decimal        @default(0.00) @db.Decimal(14, 2)
+  rebateAmount      Decimal        @default(0.00) @db.Decimal(14, 2)
+  totalCost         Decimal        @default(0.00) @db.Decimal(14, 2)
+  marginPercent     Decimal?       @db.Decimal(8, 4)
+  manualCost        Decimal        @default(0.00) @db.Decimal(14, 2)
+  manualRetail      Decimal        @default(0.00) @db.Decimal(14, 2)
+  manualMargin      Decimal?       @db.Decimal(8, 4)
+  referenceNumber   String?
+  notes             String?
   inventoryPostedAt DateTime?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
@@ -1043,7 +1151,7 @@ model Purchase {
   updatedByActorId String?
   updatedByActor   Staff?  @relation("PurchaseUpdatedBy", fields: [updatedByActorId], references: [id], onDelete: SetNull)
 
-  items PurchaseItem[]
+  items    PurchaseItem[]
   expenses PurchaseExpense[]
 
   @@unique([storeId, purchaseNumber])

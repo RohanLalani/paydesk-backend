@@ -108,6 +108,26 @@ const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
     label: 'Override Prices',
     description: 'Can override item prices during sales',
   },
+  {
+    key: StorePermissionKey.view_promotions,
+    label: 'View Promotions',
+    description: 'Can view store promotions',
+  },
+  {
+    key: StorePermissionKey.manage_promotions,
+    label: 'Manage Promotions',
+    description: 'Can create and edit store promotions',
+  },
+  {
+    key: StorePermissionKey.activate_promotions,
+    label: 'Activate Promotions',
+    description: 'Can activate, pause, and archive promotions',
+  },
+  {
+    key: StorePermissionKey.override_promotions,
+    label: 'Override Promotions',
+    description: 'Can override promotion selection at the POS',
+  },
 ];
 
 const PERMISSION_KEYS = new Set<StorePermissionKey>(
