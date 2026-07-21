@@ -278,7 +278,10 @@ export class AuditService {
     const search = this.optionalString(query.search, 'search');
     const changeType = this.optionalString(query.changeType, 'changeType');
     const field = this.optionalString(query.field, 'field');
-    const departmentId = this.optionalString(query.departmentId, 'departmentId');
+    const departmentId = this.optionalString(
+      query.departmentId,
+      'departmentId',
+    );
     const categoryId = this.optionalString(query.categoryId, 'categoryId');
     const priceGroupId = this.optionalString(
       query.priceGroupId,
@@ -296,7 +299,12 @@ export class AuditService {
       'timestamp',
       'sort',
     );
-    const order = this.optionalSort(query.order, ['asc', 'desc'], 'desc', 'order');
+    const order = this.optionalSort(
+      query.order,
+      ['asc', 'desc'],
+      'desc',
+      'order',
+    );
 
     const where: Prisma.AuditEventWhereInput = {
       storeId,
@@ -346,7 +354,10 @@ export class AuditService {
         this.compareProductLogRows(left, right, sort, order),
       );
 
-    const items = rows.slice(pagination.skip, pagination.skip + pagination.limit);
+    const items = rows.slice(
+      pagination.skip,
+      pagination.skip + pagination.limit,
+    );
 
     return {
       items,
@@ -529,7 +540,11 @@ export class AuditService {
           change?.before,
           before,
         );
-        const newValue = this.resolveProductAuditValue(key, change?.after, after);
+        const newValue = this.resolveProductAuditValue(
+          key,
+          change?.after,
+          after,
+        );
 
         return {
           field: key,
@@ -567,7 +582,8 @@ export class AuditService {
     },
   ) {
     if (filters.source && row.source !== filters.source) return false;
-    if (filters.changeType && row.changeType !== filters.changeType) return false;
+    if (filters.changeType && row.changeType !== filters.changeType)
+      return false;
     if (
       filters.field &&
       !row.changedFields.some((change) => change.field === filters.field)
@@ -576,7 +592,8 @@ export class AuditService {
     }
     if (filters.changedBy) {
       const actorNeedle = filters.changedBy.toLowerCase();
-      const actorText = `${row.changedBy?.name ?? ''} ${row.changedBy?.email ?? ''}`.toLowerCase();
+      const actorText =
+        `${row.changedBy?.name ?? ''} ${row.changedBy?.email ?? ''}`.toLowerCase();
       if (!actorText.includes(actorNeedle)) return false;
     }
     if (filters.departmentId && row.departmentId !== filters.departmentId) {
@@ -756,9 +773,7 @@ export class AuditService {
     return 'general';
   }
 
-  private resolveChangesSummary(
-    changedFields: Array<{ fieldLabel: string }>,
-  ) {
+  private resolveChangesSummary(changedFields: Array<{ fieldLabel: string }>) {
     if (changedFields.length <= 3) {
       return changedFields.map((change) => change.fieldLabel).join(', ');
     }

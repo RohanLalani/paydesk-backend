@@ -650,6 +650,7 @@ export class BillingService {
       usable,
       tx,
     );
+    await this.syncVendorOrdersEntitlement(storeId, plan, usable, tx);
 
     const store = await tx.store.findUnique({
       where: { id: storeId },
@@ -902,6 +903,32 @@ export class BillingService {
       },
       update: {
         enabled: subscriptionUsable && Boolean(loyaltyItem),
+        source: StoreFeatureSource.subscription,
+      },
+    });
+  }
+
+  private async syncVendorOrdersEntitlement(
+    storeId: string,
+    plan: SubscriptionPlan,
+    subscriptionUsable: boolean,
+    tx: Prisma.TransactionClient,
+  ) {
+    await tx.storeFeature.upsert({
+      where: {
+        storeId_feature: {
+          storeId,
+          feature: StoreFeatureKey.vendor_orders,
+        },
+      },
+      create: {
+        storeId,
+        feature: StoreFeatureKey.vendor_orders,
+        enabled: subscriptionUsable && plan === SubscriptionPlan.advanced,
+        source: StoreFeatureSource.subscription,
+      },
+      update: {
+        enabled: subscriptionUsable && plan === SubscriptionPlan.advanced,
         source: StoreFeatureSource.subscription,
       },
     });

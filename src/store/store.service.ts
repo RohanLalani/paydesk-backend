@@ -770,6 +770,7 @@ export class StoreService {
     const loyaltyEnabled = Boolean(
       loyaltyService && this.isActiveServiceStatus(loyaltyService.status),
     );
+    const vendorOrders = featureMap.get(StoreFeatureKey.vendor_orders);
 
     return {
       storeId: store.id,
@@ -783,6 +784,11 @@ export class StoreService {
           enabled: recipeSuite?.enabled === true,
           available: recipeSuite?.enabled === true,
           source: recipeSuite?.source ?? StoreFeatureSource.setup,
+        },
+        orders: {
+          enabled: vendorOrders?.enabled === true,
+          available: vendorOrders?.enabled === true,
+          source: vendorOrders?.source ?? StoreFeatureSource.subscription,
         },
         loyalty: {
           enabled: loyaltyEnabled,

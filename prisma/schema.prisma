@@ -48,6 +48,7 @@ enum StoreFeatureKey {
   lottery
   recipe_suite
   loyalty
+  vendor_orders
 }
 
 enum StoreFeatureSource {
@@ -340,6 +341,15 @@ enum PayeeType {
   EXPENSE
 }
 
+enum VendorOrderStatus {
+  DRAFT
+  READY
+  SENT
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
 model Staff {
   id              String    @id @default(uuid())
   email           String    @unique
@@ -490,6 +500,8 @@ model Store {
   productCategories       ProductCategory[]
   taxes                   Tax[]
   payees                  Payee[]
+  productVendors          ProductVendor[]
+  vendorOrders            VendorOrder[]
   purchases               Purchase[]
   customers               CustomerStore[]
   customerTiers           CustomerTier[]
@@ -803,6 +815,8 @@ model Product {
   inventoryLogs        InventoryLog[]
   transactionItems     TransactionItem[]
   purchaseItems        PurchaseItem[]
+  productVendors       ProductVendor[]
+  vendorOrderItems     VendorOrderItem[]
   cartItems            CartItem[]
   multiPacks           ProductMultiPack[]
   multiPackProposals   MultiPackProposal[]
@@ -1109,9 +1123,87 @@ model Payee {
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
   purchases Purchase[]
+  productVendors ProductVendor[]
+  vendorOrders VendorOrder[]
 
   @@unique([storeId, name])
   @@index([storeId, isActive, name])
+}
+
+model ProductVendor {
+  id              String   @id @default(uuid())
+  storeId         String
+  productId       String
+  payeeId         String
+  vendorSku       String?
+  unitsPerCase    Int      @default(1)
+  caseCost        Decimal  @db.Decimal(14, 2)
+  caseDiscount    Decimal  @default(0.00) @db.Decimal(14, 2)
+  minOrderQuantity Int?
+  leadTimeDays    Int?
+  isPreferred     Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  store   Store   @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  payee   Payee   @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+  vendorOrderItems VendorOrderItem[]
+
+  @@unique([storeId, productId, payeeId])
+  @@index([storeId, productId, isActive])
+  @@index([storeId, payeeId, isActive])
+}
+
+model VendorOrder {
+  id                String            @id @default(uuid())
+  storeId           String
+  payeeId           String
+  status            VendorOrderStatus @default(DRAFT)
+  estimatedCost     Decimal           @default(0.00) @db.Decimal(14, 2)
+  purchaseId        String?
+  notes             String?
+  sentAt            DateTime?
+  receivedAt        DateTime?
+  cancelledAt       DateTime?
+  createdByActorId  String?
+  updatedByActorId  String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  payee Payee @relation(fields: [payeeId], references: [id])
+  items VendorOrderItem[]
+
+  @@index([storeId, status, createdAt])
+  @@index([storeId, payeeId, createdAt])
+}
+
+model VendorOrderItem {
+  id                    String   @id @default(uuid())
+  vendorOrderId         String
+  productVendorId       String?
+  productId             String
+  quantityOrdered       Int
+  quantityReceived      Int      @default(0)
+  unitsPerCase          Int      @default(1)
+  caseCost              Decimal  @db.Decimal(14, 2)
+  caseDiscount          Decimal  @default(0.00) @db.Decimal(14, 2)
+  unitCost              Decimal  @db.Decimal(14, 4)
+  extendedCost          Decimal  @db.Decimal(14, 2)
+  productNumberSnapshot Int?
+  barcodeSnapshot       String?
+  productNameSnapshot   String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  vendorOrder   VendorOrder    @relation(fields: [vendorOrderId], references: [id], onDelete: Cascade)
+  productVendor ProductVendor? @relation(fields: [productVendorId], references: [id], onDelete: SetNull)
+  product       Product        @relation(fields: [productId], references: [id])
+
+  @@index([vendorOrderId])
+  @@index([productId, vendorOrderId])
 }
 
 model Purchase {

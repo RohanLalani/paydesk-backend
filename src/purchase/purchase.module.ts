@@ -5,9 +5,21 @@ import { PrismaService } from '../prisma.service';
 import { PurchaseService } from './purchase.service';
 import { StorePayeesController } from './store-payees.controller';
 import { StorePurchasesController } from './store-purchases.controller';
+import { VendorOrdersController } from './vendor-orders.controller';
+import { VendorOrdersService } from './vendor-orders.service';
 
 @Module({
-  controllers: [StorePayeesController, StorePurchasesController],
-  providers: [PurchaseService, AuditService, PrismaService, PosAccessService],
+  controllers: [
+    StorePayeesController,
+    StorePurchasesController,
+    VendorOrdersController,
+  ],
+  providers: [
+    PurchaseService,
+    VendorOrdersService,
+    AuditService,
+    PrismaService,
+    PosAccessService,
+  ],
 })
 export class PurchaseModule {}
