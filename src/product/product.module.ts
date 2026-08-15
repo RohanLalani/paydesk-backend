@@ -11,6 +11,7 @@ import { StoreDepartmentsController } from './store-departments.controller';
 import { StoreInventoryAdjustmentReasonsController } from './store-inventory-adjustment-reasons.controller';
 import { StorePriceGroupsController } from './store-price-groups.controller';
 import { StoreProductsController } from './store-products.controller';
+import { StoreRefundReasonsController } from './store-refund-reasons.controller';
 import { StoreTaxesController } from './store-taxes.controller';
 
 @Module({
@@ -21,6 +22,7 @@ import { StoreTaxesController } from './store-taxes.controller';
     StoreInventoryAdjustmentReasonsController,
     StorePriceGroupsController,
     StoreProductsController,
+    StoreRefundReasonsController,
     StoreTaxesController,
   ],
   providers: [

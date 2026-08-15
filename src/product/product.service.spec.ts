@@ -696,6 +696,159 @@ describe('ProductService inventory adjustment reason APIs', () => {
   });
 });
 
+describe('ProductService refund reason APIs', () => {
+  let service: ProductService;
+  let prisma: {
+    refundReason: {
+      findMany: jest.Mock;
+      findFirst: jest.Mock;
+      create: jest.Mock;
+    };
+  };
+  let access: { ensureStoreAccess: jest.Mock };
+
+  const user = {
+    accountId: 'owner-1',
+    staffId: 'staff-owner-1',
+    role: StaffRole.owner,
+    type: StaffRole.owner,
+  };
+
+  beforeEach(() => {
+    prisma = {
+      refundReason: {
+        findMany: jest.fn().mockResolvedValue([refundReasonFixture()]),
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue(refundReasonFixture()),
+      },
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new ProductService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  it('lists store-scoped refund reasons newest first', async () => {
+    await expect(
+      service.listStoreRefundReasons('store-1', user, {
+        search: 'customer',
+      }),
+    ).resolves.toEqual({
+      items: [
+        expect.objectContaining({
+          name: 'Customer Changed Mind',
+          returnToInventory: true,
+        }),
+      ],
+      total: 1,
+    });
+
+    expect(access.ensureStoreAccess).toHaveBeenCalledWith(
+      'store-1',
+      user,
+      'manage_products',
+    );
+    expect(prisma.refundReason.findMany).toHaveBeenCalledWith({
+      where: {
+        storeId: 'store-1',
+        OR: [
+          { name: { contains: 'customer', mode: 'insensitive' } },
+          { description: { contains: 'customer', mode: 'insensitive' } },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    });
+  });
+
+  it('creates a normalized refund reason with explicit inventory behavior', async () => {
+    await service.createStoreRefundReason(
+      'store-1',
+      {
+        name: '  Customer   Changed Mind ',
+        description: '  Unopened product return.  ',
+        returnToInventory: false,
+      },
+      user,
+    );
+
+    expect(prisma.refundReason.findFirst).toHaveBeenCalledWith({
+      where: { storeId: 'store-1', normalizedName: 'customer changed mind' },
+      select: { id: true },
+    });
+    expect(prisma.refundReason.create).toHaveBeenCalledWith({
+      data: {
+        storeId: 'store-1',
+        name: 'Customer Changed Mind',
+        normalizedName: 'customer changed mind',
+        description: 'Unopened product return.',
+        returnToInventory: false,
+      },
+    });
+  });
+
+  it('defaults returnToInventory to true', async () => {
+    await service.createStoreRefundReason(
+      'store-1',
+      { name: 'Customer Changed Mind' },
+      user,
+    );
+
+    expect(prisma.refundReason.create).toHaveBeenCalledWith({
+      data: {
+        storeId: 'store-1',
+        name: 'Customer Changed Mind',
+        normalizedName: 'customer changed mind',
+        description: null,
+        returnToInventory: true,
+      },
+    });
+  });
+
+  it('rejects duplicate refund reason names case-insensitively within a store', async () => {
+    prisma.refundReason.findFirst.mockResolvedValueOnce({
+      id: 'refund-reason-existing',
+    });
+
+    await expect(
+      service.createStoreRefundReason(
+        'store-1',
+        { name: 'customer changed mind' },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(prisma.refundReason.create).not.toHaveBeenCalled();
+  });
+
+  it('requires returnToInventory to be boolean when provided', async () => {
+    await expect(
+      service.createStoreRefundReason(
+        'store-1',
+        { name: 'Customer Changed Mind', returnToInventory: 'yes' },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(prisma.refundReason.create).not.toHaveBeenCalled();
+  });
+
+  it('checks duplicates within the selected store only', async () => {
+    await service.createStoreRefundReason(
+      'store-2',
+      { name: 'Customer Changed Mind' },
+      user,
+    );
+
+    expect(prisma.refundReason.findFirst).toHaveBeenCalledWith({
+      where: { storeId: 'store-2', normalizedName: 'customer changed mind' },
+      select: { id: true },
+    });
+  });
+});
+
 describe('ProductService department management APIs', () => {
   let service: ProductService;
   let prisma: {
@@ -1099,6 +1252,21 @@ function adjustmentReasonFixture(overrides: Record<string, unknown> = {}) {
     name: 'Damaged Product',
     normalizedName: 'damaged product',
     description: 'Used when merchandise is damaged.',
+    isActive: true,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function refundReasonFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'refund-reason-1',
+    storeId: 'store-1',
+    name: 'Customer Changed Mind',
+    normalizedName: 'customer changed mind',
+    description: 'Used when the customer no longer wants an unopened product.',
+    returnToInventory: true,
     isActive: true,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-02T00:00:00.000Z'),

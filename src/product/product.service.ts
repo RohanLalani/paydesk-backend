@@ -212,6 +212,59 @@ export class ProductService {
     }
   }
 
+  async listStoreRefundReasons(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const search = this.optionalSearch(query.search, 'search');
+    const where: Prisma.RefundReasonWhereInput = {
+      storeId,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              { description: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+    const reasons = await this.prisma.refundReason.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    });
+
+    return {
+      items: reasons.map((reason) => this.serializeRefundReason(reason)),
+      total: reasons.length,
+    };
+  }
+
+  async createStoreRefundReason(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const dto = this.parseCreateRefundReasonBody(body);
+    await this.ensureRefundReasonNameAvailable(storeId, dto.normalizedName);
+
+    try {
+      const reason = await this.prisma.refundReason.create({
+        data: {
+          ...dto,
+          storeId,
+        },
+      });
+
+      return this.serializeRefundReason(reason);
+    } catch (error) {
+      this.handleRefundReasonConflict(error);
+      throw error;
+    }
+  }
+
   async createStoreDepartment(
     storeId: string,
     body: Record<string, unknown>,
@@ -3249,7 +3302,55 @@ export class ProductService {
     };
   }
 
+  private parseCreateRefundReasonBody(body: Record<string, unknown>) {
+    this.ensureAllowedFields(body, this.refundReasonFields);
+    const name = this.normalizeRefundReasonName(body.name);
+
+    return {
+      name,
+      normalizedName: this.normalizeNameForUniqueConstraint(name),
+      description: this.optionalLimitedString(
+        body.description,
+        'description',
+        240,
+      ),
+      returnToInventory:
+        this.optionalBoolean(
+          body.returnToInventory,
+          'returnToInventory',
+          true,
+        ) ?? true,
+    };
+  }
+
   private normalizeInventoryAdjustmentReasonName(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('name is required');
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      throw new BadRequestException('name is required');
+    }
+
+    if (normalized.length > 100) {
+      throw new BadRequestException('name must be 100 characters or fewer');
+    }
+
+    if (
+      [...normalized].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      throw new BadRequestException('name contains unsupported characters');
+    }
+
+    return normalized;
+  }
+
+  private normalizeRefundReasonName(value: unknown) {
     if (typeof value !== 'string') {
       throw new BadRequestException('name is required');
     }
@@ -3636,6 +3737,25 @@ export class ProductService {
     if (existing) {
       throw new ConflictException(
         'An inventory adjustment reason with this name already exists.',
+      );
+    }
+  }
+
+  private async ensureRefundReasonNameAvailable(
+    storeId: string,
+    normalizedName: string,
+  ) {
+    const existing = await this.prisma.refundReason.findFirst({
+      where: {
+        storeId,
+        normalizedName,
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      throw new ConflictException(
+        'A refund reason with this name already exists.',
       );
     }
   }
@@ -4241,6 +4361,17 @@ export class ProductService {
     }
   }
 
+  private handleRefundReasonConflict(error: unknown) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      throw new ConflictException(
+        'A refund reason with this name already exists.',
+      );
+    }
+  }
+
   private handleDepartmentNameConflict(error: unknown) {
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -4332,6 +4463,19 @@ export class ProductService {
       storeId: reason.storeId,
       name: reason.name,
       description: reason.description,
+      isActive: reason.isActive,
+      createdAt: reason.createdAt,
+      updatedAt: reason.updatedAt,
+    };
+  }
+
+  private serializeRefundReason(reason: Prisma.RefundReasonGetPayload<object>) {
+    return {
+      id: reason.id,
+      storeId: reason.storeId,
+      name: reason.name,
+      description: reason.description,
+      returnToInventory: reason.returnToInventory,
       isActive: reason.isActive,
       createdAt: reason.createdAt,
       updatedAt: reason.updatedAt,
@@ -4493,6 +4637,12 @@ export class ProductService {
   ];
 
   private readonly inventoryAdjustmentReasonFields = ['name', 'description'];
+
+  private readonly refundReasonFields = [
+    'name',
+    'description',
+    'returnToInventory',
+  ];
 
   private readonly categoryFields = [
     'name',

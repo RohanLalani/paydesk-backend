@@ -518,6 +518,7 @@ model Store {
   auditEvents                AuditEvent[]
   promotions                 Promotion[]
   inventoryAdjustmentReasons InventoryAdjustmentReason[]
+  refundReasons              RefundReason[]
 
   @@index([ownerId, isActive])
 }
@@ -1048,6 +1049,24 @@ model InventoryAdjustmentReason {
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, normalizedName])
+  @@index([storeId, isActive])
+  @@index([storeId, createdAt])
+}
+
+model RefundReason {
+  id                String   @id @default(uuid())
+  storeId           String
+  name              String
+  normalizedName    String
+  description       String?
+  returnToInventory Boolean  @default(true)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
