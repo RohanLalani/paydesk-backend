@@ -154,6 +154,64 @@ export class ProductService {
     };
   }
 
+  async listStoreInventoryAdjustmentReasons(
+    storeId: string,
+    user: AuthTokenPayload,
+    query: Record<string, unknown> = {},
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const search = this.optionalSearch(query.search, 'search');
+    const where: Prisma.InventoryAdjustmentReasonWhereInput = {
+      storeId,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              { description: { contains: search, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+    const reasons = await this.prisma.inventoryAdjustmentReason.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    });
+
+    return {
+      items: reasons.map((reason) =>
+        this.serializeInventoryAdjustmentReason(reason),
+      ),
+      total: reasons.length,
+    };
+  }
+
+  async createStoreInventoryAdjustmentReason(
+    storeId: string,
+    body: Record<string, unknown>,
+    user: AuthTokenPayload,
+  ) {
+    await this.access.ensureStoreAccess(storeId, user, 'manage_products');
+    const dto = this.parseCreateInventoryAdjustmentReasonBody(body);
+    await this.ensureInventoryAdjustmentReasonNameAvailable(
+      storeId,
+      dto.normalizedName,
+    );
+
+    try {
+      const reason = await this.prisma.inventoryAdjustmentReason.create({
+        data: {
+          ...dto,
+          storeId,
+        },
+      });
+
+      return this.serializeInventoryAdjustmentReason(reason);
+    } catch (error) {
+      this.handleInventoryAdjustmentReasonConflict(error);
+      throw error;
+    }
+  }
+
   async createStoreDepartment(
     storeId: string,
     body: Record<string, unknown>,
@@ -3174,6 +3232,54 @@ export class ProductService {
     return data;
   }
 
+  private parseCreateInventoryAdjustmentReasonBody(
+    body: Record<string, unknown>,
+  ) {
+    this.ensureAllowedFields(body, this.inventoryAdjustmentReasonFields);
+    const name = this.normalizeInventoryAdjustmentReasonName(body.name);
+
+    return {
+      name,
+      normalizedName: this.normalizeNameForUniqueConstraint(name),
+      description: this.optionalLimitedString(
+        body.description,
+        'description',
+        240,
+      ),
+    };
+  }
+
+  private normalizeInventoryAdjustmentReasonName(value: unknown) {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('name is required');
+    }
+
+    const normalized = value.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      throw new BadRequestException('name is required');
+    }
+
+    if (normalized.length > 100) {
+      throw new BadRequestException('name must be 100 characters or fewer');
+    }
+
+    if (
+      [...normalized].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      })
+    ) {
+      throw new BadRequestException('name contains unsupported characters');
+    }
+
+    return normalized;
+  }
+
+  private normalizeNameForUniqueConstraint(value: string) {
+    return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+  }
+
   private parseCreateCategoryBody(body: Record<string, unknown>) {
     this.ensureAllowedFields(body, this.categoryFields);
 
@@ -3511,6 +3617,25 @@ export class ProductService {
     if (duplicate) {
       throw new ConflictException(
         'A price group with this name already exists in this store.',
+      );
+    }
+  }
+
+  private async ensureInventoryAdjustmentReasonNameAvailable(
+    storeId: string,
+    normalizedName: string,
+  ) {
+    const existing = await this.prisma.inventoryAdjustmentReason.findFirst({
+      where: {
+        storeId,
+        normalizedName,
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      throw new ConflictException(
+        'An inventory adjustment reason with this name already exists.',
       );
     }
   }
@@ -4105,6 +4230,17 @@ export class ProductService {
     }
   }
 
+  private handleInventoryAdjustmentReasonConflict(error: unknown) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      throw new ConflictException(
+        'An inventory adjustment reason with this name already exists.',
+      );
+    }
+  }
+
   private handleDepartmentNameConflict(error: unknown) {
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -4185,6 +4321,20 @@ export class ProductService {
       createdAt: department.createdAt,
       updatedAt: department.updatedAt,
       productCount: department._count.products,
+    };
+  }
+
+  private serializeInventoryAdjustmentReason(
+    reason: Prisma.InventoryAdjustmentReasonGetPayload<object>,
+  ) {
+    return {
+      id: reason.id,
+      storeId: reason.storeId,
+      name: reason.name,
+      description: reason.description,
+      isActive: reason.isActive,
+      createdAt: reason.createdAt,
+      updatedAt: reason.updatedAt,
     };
   }
 
@@ -4341,6 +4491,8 @@ export class ProductService {
     'onPos',
     'isActive',
   ];
+
+  private readonly inventoryAdjustmentReasonFields = ['name', 'description'];
 
   private readonly categoryFields = [
     'name',

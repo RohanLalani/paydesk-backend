@@ -580,6 +580,122 @@ describe('ProductService item editor APIs', () => {
   });
 });
 
+describe('ProductService inventory adjustment reason APIs', () => {
+  let service: ProductService;
+  let prisma: {
+    inventoryAdjustmentReason: {
+      findMany: jest.Mock;
+      findFirst: jest.Mock;
+      create: jest.Mock;
+    };
+  };
+  let access: { ensureStoreAccess: jest.Mock };
+
+  const user = {
+    accountId: 'owner-1',
+    staffId: 'staff-owner-1',
+    role: StaffRole.owner,
+    type: StaffRole.owner,
+  };
+
+  beforeEach(() => {
+    prisma = {
+      inventoryAdjustmentReason: {
+        findMany: jest.fn().mockResolvedValue([adjustmentReasonFixture()]),
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue(adjustmentReasonFixture()),
+      },
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new ProductService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  it('lists store-scoped inventory adjustment reasons newest first', async () => {
+    await expect(
+      service.listStoreInventoryAdjustmentReasons('store-1', user, {
+        search: 'damage',
+      }),
+    ).resolves.toEqual({
+      items: [expect.objectContaining({ name: 'Damaged Product' })],
+      total: 1,
+    });
+
+    expect(access.ensureStoreAccess).toHaveBeenCalledWith(
+      'store-1',
+      user,
+      'manage_products',
+    );
+    expect(prisma.inventoryAdjustmentReason.findMany).toHaveBeenCalledWith({
+      where: {
+        storeId: 'store-1',
+        OR: [
+          { name: { contains: 'damage', mode: 'insensitive' } },
+          { description: { contains: 'damage', mode: 'insensitive' } },
+        ],
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+    });
+  });
+
+  it('creates a normalized reason for the selected store', async () => {
+    await service.createStoreInventoryAdjustmentReason(
+      'store-1',
+      {
+        name: '  Damaged   Product ',
+        description: '  Used when merchandise is damaged.  ',
+      },
+      user,
+    );
+
+    expect(prisma.inventoryAdjustmentReason.findFirst).toHaveBeenCalledWith({
+      where: { storeId: 'store-1', normalizedName: 'damaged product' },
+      select: { id: true },
+    });
+    expect(prisma.inventoryAdjustmentReason.create).toHaveBeenCalledWith({
+      data: {
+        storeId: 'store-1',
+        name: 'Damaged Product',
+        normalizedName: 'damaged product',
+        description: 'Used when merchandise is damaged.',
+      },
+    });
+  });
+
+  it('rejects duplicate reason names case-insensitively within a store', async () => {
+    prisma.inventoryAdjustmentReason.findFirst.mockResolvedValueOnce({
+      id: 'reason-existing',
+    });
+
+    await expect(
+      service.createStoreInventoryAdjustmentReason(
+        'store-1',
+        { name: 'damaged product' },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(prisma.inventoryAdjustmentReason.create).not.toHaveBeenCalled();
+  });
+
+  it('checks duplicates within the selected store only', async () => {
+    await service.createStoreInventoryAdjustmentReason(
+      'store-2',
+      { name: 'Damaged Product' },
+      user,
+    );
+
+    expect(prisma.inventoryAdjustmentReason.findFirst).toHaveBeenCalledWith({
+      where: { storeId: 'store-2', normalizedName: 'damaged product' },
+      select: { id: true },
+    });
+  });
+});
+
 describe('ProductService department management APIs', () => {
   let service: ProductService;
   let prisma: {
@@ -970,6 +1086,20 @@ function departmentFixture(overrides: Record<string, unknown> = {}) {
     onPos: true,
     isActive: true,
     _count: { products: 0 },
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-02T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function adjustmentReasonFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'reason-1',
+    storeId: 'store-1',
+    name: 'Damaged Product',
+    normalizedName: 'damaged product',
+    description: 'Used when merchandise is damaged.',
+    isActive: true,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-02T00:00:00.000Z'),
     ...overrides,

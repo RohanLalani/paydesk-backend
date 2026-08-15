@@ -490,33 +490,34 @@ model Store {
   ownerId String
   owner   Owner  @relation(fields: [ownerId], references: [id])
 
-  staff                   StoreStaff[]
-  products                Product[]
-  productMultiPacks       ProductMultiPack[]
-  multiPackProposals      MultiPackProposal[]
-  inventoryLogs           InventoryLog[]
-  departments             Department[]
-  priceGroups             PriceGroup[]
-  productCategories       ProductCategory[]
-  taxes                   Tax[]
-  payees                  Payee[]
-  productVendors          ProductVendor[]
-  vendorOrders            VendorOrder[]
-  purchases               Purchase[]
-  customers               CustomerStore[]
-  customerTiers           CustomerTier[]
-  customerTierRules       CustomerTierRule[]
-  customerPurchaseHistory CustomerPurchaseHistory[]
-  transactions            Transaction[]
-  carts                   Cart[]
-  registers               Register[]
-  registerActivationCodes RegisterActivationCode[]
-  registerDevices         RegisterDevice[]
-  storeSubscription       StoreSubscription?
-  features                StoreFeature[]
-  serviceSubscriptions    StoreServiceSubscription[]
-  auditEvents             AuditEvent[]
-  promotions              Promotion[]
+  staff                      StoreStaff[]
+  products                   Product[]
+  productMultiPacks          ProductMultiPack[]
+  multiPackProposals         MultiPackProposal[]
+  inventoryLogs              InventoryLog[]
+  departments                Department[]
+  priceGroups                PriceGroup[]
+  productCategories          ProductCategory[]
+  taxes                      Tax[]
+  payees                     Payee[]
+  productVendors             ProductVendor[]
+  vendorOrders               VendorOrder[]
+  purchases                  Purchase[]
+  customers                  CustomerStore[]
+  customerTiers              CustomerTier[]
+  customerTierRules          CustomerTierRule[]
+  customerPurchaseHistory    CustomerPurchaseHistory[]
+  transactions               Transaction[]
+  carts                      Cart[]
+  registers                  Register[]
+  registerActivationCodes    RegisterActivationCode[]
+  registerDevices            RegisterDevice[]
+  storeSubscription          StoreSubscription?
+  features                   StoreFeature[]
+  serviceSubscriptions       StoreServiceSubscription[]
+  auditEvents                AuditEvent[]
+  promotions                 Promotion[]
+  inventoryAdjustmentReasons InventoryAdjustmentReason[]
 
   @@index([ownerId, isActive])
 }
@@ -1038,6 +1039,23 @@ model InventoryLog {
   @@index([referenceType, referenceId])
 }
 
+model InventoryAdjustmentReason {
+  id             String   @id @default(uuid())
+  storeId        String
+  name           String
+  normalizedName String
+  description    String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, normalizedName])
+  @@index([storeId, isActive])
+  @@index([storeId, createdAt])
+}
+
 model PriceGroup {
   id                     String    @id @default(uuid())
   name                   String
@@ -1122,33 +1140,33 @@ model Payee {
   storeId String
   store   Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
 
-  purchases Purchase[]
+  purchases      Purchase[]
   productVendors ProductVendor[]
-  vendorOrders VendorOrder[]
+  vendorOrders   VendorOrder[]
 
   @@unique([storeId, name])
   @@index([storeId, isActive, name])
 }
 
 model ProductVendor {
-  id              String   @id @default(uuid())
-  storeId         String
-  productId       String
-  payeeId         String
-  vendorSku       String?
-  unitsPerCase    Int      @default(1)
-  caseCost        Decimal  @db.Decimal(14, 2)
-  caseDiscount    Decimal  @default(0.00) @db.Decimal(14, 2)
+  id               String   @id @default(uuid())
+  storeId          String
+  productId        String
+  payeeId          String
+  vendorSku        String?
+  unitsPerCase     Int      @default(1)
+  caseCost         Decimal  @db.Decimal(14, 2)
+  caseDiscount     Decimal  @default(0.00) @db.Decimal(14, 2)
   minOrderQuantity Int?
-  leadTimeDays    Int?
-  isPreferred     Boolean  @default(false)
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  leadTimeDays     Int?
+  isPreferred      Boolean  @default(false)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  store   Store   @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  payee   Payee   @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+  store            Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product          Product           @relation(fields: [productId], references: [id], onDelete: Cascade)
+  payee            Payee             @relation(fields: [payeeId], references: [id], onDelete: Cascade)
   vendorOrderItems VendorOrderItem[]
 
   @@unique([storeId, productId, payeeId])
@@ -1157,23 +1175,23 @@ model ProductVendor {
 }
 
 model VendorOrder {
-  id                String            @id @default(uuid())
-  storeId           String
-  payeeId           String
-  status            VendorOrderStatus @default(DRAFT)
-  estimatedCost     Decimal           @default(0.00) @db.Decimal(14, 2)
-  purchaseId        String?
-  notes             String?
-  sentAt            DateTime?
-  receivedAt        DateTime?
-  cancelledAt       DateTime?
-  createdByActorId  String?
-  updatedByActorId  String?
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  id               String            @id @default(uuid())
+  storeId          String
+  payeeId          String
+  status           VendorOrderStatus @default(DRAFT)
+  estimatedCost    Decimal           @default(0.00) @db.Decimal(14, 2)
+  purchaseId       String?
+  notes            String?
+  sentAt           DateTime?
+  receivedAt       DateTime?
+  cancelledAt      DateTime?
+  createdByActorId String?
+  updatedByActorId String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
-  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  payee Payee @relation(fields: [payeeId], references: [id])
+  store Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  payee Payee             @relation(fields: [payeeId], references: [id])
   items VendorOrderItem[]
 
   @@index([storeId, status, createdAt])

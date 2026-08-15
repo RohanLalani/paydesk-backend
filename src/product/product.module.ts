@@ -8,6 +8,7 @@ import { ProductController } from './product.controller';
 import { ProductService } from './product.service';
 import { StoreCategoriesController } from './store-categories.controller';
 import { StoreDepartmentsController } from './store-departments.controller';
+import { StoreInventoryAdjustmentReasonsController } from './store-inventory-adjustment-reasons.controller';
 import { StorePriceGroupsController } from './store-price-groups.controller';
 import { StoreProductsController } from './store-products.controller';
 import { StoreTaxesController } from './store-taxes.controller';
@@ -17,6 +18,7 @@ import { StoreTaxesController } from './store-taxes.controller';
     ProductController,
     StoreCategoriesController,
     StoreDepartmentsController,
+    StoreInventoryAdjustmentReasonsController,
     StorePriceGroupsController,
     StoreProductsController,
     StoreTaxesController,
