@@ -2225,19 +2225,39 @@ export class ProductService {
     query: Record<string, unknown> = {},
   ) {
     await this.access.ensureStoreAccess(storeId, user, 'view_store');
-    const pagination = this.parsePagination(query);
+    const pagination = this.parseInventoryLogPagination(query);
     const actionType = this.optionalInventoryActionType(
       query.actionType,
       'actionType',
     );
     const search = this.optionalSearch(query.search, 'search');
+    const productId = this.optionalString(query.productId, 'productId');
+    const from = this.optionalDate(query.from, 'from');
+    const to = this.optionalDate(query.to, 'to');
+    const actionTypeSearchMatches = search
+      ? this.searchInventoryActionTypes(search)
+      : [];
     const where: Prisma.InventoryLogWhereInput = {
       storeId,
       ...(actionType ? { actionType } : {}),
+      ...(productId ? { productId } : {}),
+      ...(from || to
+        ? {
+            createdAt: {
+              ...(from ? { gte: from } : {}),
+              ...(to ? { lte: to } : {}),
+            },
+          }
+        : {}),
       ...(search
         ? {
             OR: [
+              ...actionTypeSearchMatches.map((matchedActionType) => ({
+                actionType: matchedActionType,
+              })),
               { reason: { contains: search, mode: 'insensitive' } },
+              { referenceType: { contains: search, mode: 'insensitive' } },
+              { referenceId: { contains: search, mode: 'insensitive' } },
               { productName: { contains: search, mode: 'insensitive' } },
               { productBarcode: { contains: search, mode: 'insensitive' } },
               ...(this.isPositiveIntegerText(search)
@@ -2252,6 +2272,8 @@ export class ProductService {
               ...(this.isPositiveIntegerText(search)
                 ? [{ product: { productNumber: Number(search) } }]
                 : []),
+              { staff: { name: { contains: search, mode: 'insensitive' } } },
+              { staff: { email: { contains: search, mode: 'insensitive' } } },
               {
                 inventoryAdjustmentReason: {
                   name: { contains: search, mode: 'insensitive' },
@@ -2262,13 +2284,24 @@ export class ProductService {
         : {}),
     };
 
-    return this.prisma.inventoryLog.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      skip: pagination.skip,
-      take: pagination.take,
-      include: this.inventoryLogInclude,
-    });
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.inventoryLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: pagination.skip,
+        take: pagination.limit,
+        include: this.inventoryLogInclude,
+      }),
+      this.prisma.inventoryLog.count({ where }),
+    ]);
+
+    return {
+      items,
+      page: pagination.page,
+      limit: pagination.limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pagination.limit)),
+    };
   }
 
   async listInventoryLogsByProduct(
@@ -3103,6 +3136,21 @@ export class ProductService {
     return {
       skip: (page - 1) * take,
       take: Math.min(take, 100),
+    };
+  }
+
+  private parseInventoryLogPagination(query: Record<string, unknown>) {
+    const page = this.optionalPositiveQueryInt(query.page, 'page') ?? 1;
+    const requestedLimit =
+      this.optionalPositiveQueryInt(query.limit, 'limit') ??
+      this.optionalPositiveQueryInt(query.take, 'take') ??
+      50;
+    const limit = Math.min(requestedLimit, 100);
+
+    return {
+      page,
+      limit,
+      skip: (page - 1) * limit,
     };
   }
 
@@ -3983,6 +4031,34 @@ export class ProductService {
     }
 
     return this.requiredEnum(value, field, InventoryActionType);
+  }
+
+  private searchInventoryActionTypes(search: string) {
+    const normalizedSearch = this.normalizeSearchLabel(search);
+
+    return Object.values(InventoryActionType).filter((actionType) =>
+      this.normalizeSearchLabel(actionType).includes(normalizedSearch),
+    );
+  }
+
+  private normalizeSearchLabel(value: string) {
+    return value.replace(/_/g, ' ').trim().toLowerCase();
+  }
+
+  private optionalDate(value: unknown, field: string) {
+    const raw = this.optionalString(value, field);
+
+    if (!raw) {
+      return undefined;
+    }
+
+    const date = new Date(raw);
+
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException(`${field} must be a valid date`);
+    }
+
+    return date;
   }
 
   private optionalPercentage(value: unknown, field: string) {

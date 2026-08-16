@@ -98,7 +98,7 @@ describe('ProductService inventory adjustments', () => {
   let txReasonFindFirst: jest.Mock;
   let prisma: {
     $transaction: jest.Mock;
-    inventoryLog: { findMany: jest.Mock };
+    inventoryLog: { findMany: jest.Mock; count: jest.Mock };
   };
   let access: { ensureStoreAccess: jest.Mock };
 
@@ -125,18 +125,25 @@ describe('ProductService inventory adjustments', () => {
       .fn()
       .mockResolvedValue(adjustmentReasonFixture({ id: 'reason-1' }));
     prisma = {
-      $transaction: jest.fn(
-        async (callback: (tx: unknown) => Promise<unknown>) =>
-          callback({
-            product: {
-              findFirst: txProductFindFirst,
-              update: txProductUpdate,
-            },
-            inventoryLog: { create: txInventoryLogCreate },
-            inventoryAdjustmentReason: { findFirst: txReasonFindFirst },
-          }),
-      ),
-      inventoryLog: { findMany: jest.fn().mockResolvedValue([]) },
+      $transaction: jest.fn(async (arg: unknown) => {
+        if (Array.isArray(arg)) {
+          return Promise.all(arg);
+        }
+
+        const callback = arg as (tx: unknown) => Promise<unknown>;
+        return callback({
+          product: {
+            findFirst: txProductFindFirst,
+            update: txProductUpdate,
+          },
+          inventoryLog: { create: txInventoryLogCreate },
+          inventoryAdjustmentReason: { findFirst: txReasonFindFirst },
+        });
+      }),
+      inventoryLog: {
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
+      },
     };
     access = {
       ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
@@ -234,18 +241,29 @@ describe('ProductService inventory adjustments', () => {
   });
 
   it('lists only manual adjustment logs with search filters', async () => {
-    await service.listInventoryLogsByStore('store-1', user, {
+    const response = await service.listInventoryLogsByStore('store-1', user, {
       actionType: 'adjustment',
       search: 'damage',
-      take: '25',
+      limit: '25',
+      page: '2',
+      from: '2026-01-01T00:00:00.000Z',
+      to: '2026-01-31T23:59:59.999Z',
+      productId: 'product-1',
     });
 
     expect(prisma.inventoryLog.findMany).toHaveBeenCalledWith({
       where: {
         storeId: 'store-1',
         actionType: InventoryActionType.adjustment,
+        productId: 'product-1',
+        createdAt: {
+          gte: new Date('2026-01-01T00:00:00.000Z'),
+          lte: new Date('2026-01-31T23:59:59.999Z'),
+        },
         OR: [
           { reason: { contains: 'damage', mode: 'insensitive' } },
+          { referenceType: { contains: 'damage', mode: 'insensitive' } },
+          { referenceId: { contains: 'damage', mode: 'insensitive' } },
           { productName: { contains: 'damage', mode: 'insensitive' } },
           { productBarcode: { contains: 'damage', mode: 'insensitive' } },
           { product: { name: { contains: 'damage', mode: 'insensitive' } } },
@@ -254,6 +272,8 @@ describe('ProductService inventory adjustments', () => {
               barcode: { contains: 'damage', mode: 'insensitive' },
             },
           },
+          { staff: { name: { contains: 'damage', mode: 'insensitive' } } },
+          { staff: { email: { contains: 'damage', mode: 'insensitive' } } },
           {
             inventoryAdjustmentReason: {
               name: { contains: 'damage', mode: 'insensitive' },
@@ -262,7 +282,7 @@ describe('ProductService inventory adjustments', () => {
         ],
       },
       orderBy: { createdAt: 'desc' },
-      skip: 0,
+      skip: 25,
       take: 25,
       include: {
         product: true,
@@ -270,6 +290,44 @@ describe('ProductService inventory adjustments', () => {
         store: true,
         inventoryAdjustmentReason: true,
       },
+    });
+    expect(prisma.inventoryLog.count).toHaveBeenCalledWith({
+      where: {
+        storeId: 'store-1',
+        actionType: InventoryActionType.adjustment,
+        productId: 'product-1',
+        createdAt: {
+          gte: new Date('2026-01-01T00:00:00.000Z'),
+          lte: new Date('2026-01-31T23:59:59.999Z'),
+        },
+        OR: [
+          { reason: { contains: 'damage', mode: 'insensitive' } },
+          { referenceType: { contains: 'damage', mode: 'insensitive' } },
+          { referenceId: { contains: 'damage', mode: 'insensitive' } },
+          { productName: { contains: 'damage', mode: 'insensitive' } },
+          { productBarcode: { contains: 'damage', mode: 'insensitive' } },
+          { product: { name: { contains: 'damage', mode: 'insensitive' } } },
+          {
+            product: {
+              barcode: { contains: 'damage', mode: 'insensitive' },
+            },
+          },
+          { staff: { name: { contains: 'damage', mode: 'insensitive' } } },
+          { staff: { email: { contains: 'damage', mode: 'insensitive' } } },
+          {
+            inventoryAdjustmentReason: {
+              name: { contains: 'damage', mode: 'insensitive' },
+            },
+          },
+        ],
+      },
+    });
+    expect(response).toEqual({
+      items: [],
+      page: 2,
+      limit: 25,
+      total: 0,
+      totalPages: 1,
     });
   });
 });
