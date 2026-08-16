@@ -6,6 +6,7 @@ import {
 import {
   DepartmentMinimumAge,
   DepartmentType,
+  InventoryActionType,
   Prisma,
   ProductSaleType,
   StaffRole,
@@ -86,6 +87,190 @@ describe('ProductService permissions', () => {
       'manage_inventory',
     );
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProductService inventory adjustments', () => {
+  let service: ProductService;
+  let txProductFindFirst: jest.Mock;
+  let txProductUpdate: jest.Mock;
+  let txInventoryLogCreate: jest.Mock;
+  let txReasonFindFirst: jest.Mock;
+  let prisma: {
+    $transaction: jest.Mock;
+    inventoryLog: { findMany: jest.Mock };
+  };
+  let access: { ensureStoreAccess: jest.Mock };
+
+  const user = {
+    accountId: 'manager-1',
+    staffId: 'staff-manager-1',
+    role: StaffRole.manager,
+    type: StaffRole.manager,
+  };
+
+  beforeEach(() => {
+    txProductFindFirst = jest.fn().mockResolvedValue(
+      productFixture({
+        productNumber: 42,
+        barcode: '012345678905',
+        name: 'Test Item',
+        currentQuantity: 20,
+        allowNegativeInventory: false,
+      }),
+    );
+    txProductUpdate = jest.fn().mockResolvedValue(productFixture());
+    txInventoryLogCreate = jest.fn().mockResolvedValue({});
+    txReasonFindFirst = jest
+      .fn()
+      .mockResolvedValue(adjustmentReasonFixture({ id: 'reason-1' }));
+    prisma = {
+      $transaction: jest.fn(
+        async (callback: (tx: unknown) => Promise<unknown>) =>
+          callback({
+            product: {
+              findFirst: txProductFindFirst,
+              update: txProductUpdate,
+            },
+            inventoryLog: { create: txInventoryLogCreate },
+            inventoryAdjustmentReason: { findFirst: txReasonFindFirst },
+          }),
+      ),
+      inventoryLog: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue(undefined),
+    };
+    service = new ProductService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  it('updates product quantity and creates one immutable adjustment log with reason snapshots', async () => {
+    await service.adjustInventory(
+      {
+        storeId: 'store-1',
+        productId: 'product-1',
+        adjustment: -3,
+        inventoryAdjustmentReasonId: 'reason-1',
+      },
+      user,
+    );
+
+    expect(txReasonFindFirst).toHaveBeenCalledWith({
+      where: { id: 'reason-1', storeId: 'store-1', isActive: true },
+    });
+    expect(txProductUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'product-1' },
+        data: { currentQuantity: 17 },
+      }),
+    );
+    expect(txInventoryLogCreate).toHaveBeenCalledWith({
+      data: {
+        storeId: 'store-1',
+        productId: 'product-1',
+        performedByStaffId: 'staff-manager-1',
+        actionType: InventoryActionType.adjustment,
+        quantityBefore: 20,
+        quantityChanged: -3,
+        quantityAfter: 17,
+        reason: 'Damaged Product',
+        referenceType: 'adjustment',
+        referenceId: 'reason-1',
+        inventoryAdjustmentReasonId: 'reason-1',
+        productName: 'Test Item',
+        productBarcode: '012345678905',
+        productNumber: 42,
+        notes: undefined,
+      },
+    });
+  });
+
+  it('rejects unknown or inactive adjustment reasons before updating inventory', async () => {
+    txReasonFindFirst.mockResolvedValueOnce(null);
+
+    await expect(
+      service.adjustInventory(
+        {
+          storeId: 'store-1',
+          productId: 'product-1',
+          adjustment: 5,
+          inventoryAdjustmentReasonId: 'reason-missing',
+        },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(txProductUpdate).not.toHaveBeenCalled();
+    expect(txInventoryLogCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects zero and decimal adjustments', async () => {
+    await expect(
+      service.adjustInventory(
+        {
+          storeId: 'store-1',
+          productId: 'product-1',
+          adjustment: 0,
+          inventoryAdjustmentReasonId: 'reason-1',
+        },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    await expect(
+      service.adjustInventory(
+        {
+          storeId: 'store-1',
+          productId: 'product-1',
+          adjustment: 1.5,
+          inventoryAdjustmentReasonId: 'reason-1',
+        },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('lists only manual adjustment logs with search filters', async () => {
+    await service.listInventoryLogsByStore('store-1', user, {
+      actionType: 'adjustment',
+      search: 'damage',
+      take: '25',
+    });
+
+    expect(prisma.inventoryLog.findMany).toHaveBeenCalledWith({
+      where: {
+        storeId: 'store-1',
+        actionType: InventoryActionType.adjustment,
+        OR: [
+          { reason: { contains: 'damage', mode: 'insensitive' } },
+          { productName: { contains: 'damage', mode: 'insensitive' } },
+          { productBarcode: { contains: 'damage', mode: 'insensitive' } },
+          { product: { name: { contains: 'damage', mode: 'insensitive' } } },
+          {
+            product: {
+              barcode: { contains: 'damage', mode: 'insensitive' },
+            },
+          },
+          {
+            inventoryAdjustmentReason: {
+              name: { contains: 'damage', mode: 'insensitive' },
+            },
+          },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: 0,
+      take: 25,
+      include: {
+        product: true,
+        staff: true,
+        store: true,
+        inventoryAdjustmentReason: true,
+      },
+    });
   });
 });
 

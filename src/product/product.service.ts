@@ -2142,6 +2142,30 @@ export class ProductService {
         dto.productId,
         dto.storeId,
       );
+      const adjustmentReason = dto.inventoryAdjustmentReasonId
+        ? await tx.inventoryAdjustmentReason.findFirst({
+            where: {
+              id: dto.inventoryAdjustmentReasonId,
+              storeId: dto.storeId,
+              isActive: true,
+            },
+          })
+        : null;
+
+      if (dto.inventoryAdjustmentReasonId && !adjustmentReason) {
+        throw new BadRequestException(
+          'inventoryAdjustmentReasonId must belong to an active reason for this store',
+        );
+      }
+
+      const reason = adjustmentReason?.name ?? dto.reason;
+
+      if (!reason) {
+        throw new BadRequestException(
+          'inventoryAdjustmentReasonId is required',
+        );
+      }
+
       const quantityAfter = product.currentQuantity + dto.adjustment;
 
       if (quantityAfter < 0 && !product.allowNegativeInventory) {
@@ -2162,9 +2186,14 @@ export class ProductService {
         quantityBefore: product.currentQuantity,
         quantityChanged: dto.adjustment,
         quantityAfter,
-        reason: dto.reason,
+        reason,
         notes: dto.notes,
         referenceType: 'adjustment',
+        referenceId: adjustmentReason?.id,
+        inventoryAdjustmentReasonId: adjustmentReason?.id,
+        productName: product.name,
+        productBarcode: product.barcode,
+        productNumber: product.productNumber,
       });
 
       await this.audit.record(tx, {
@@ -2181,7 +2210,8 @@ export class ProductService {
         metadata: {
           actionType: InventoryActionType.adjustment,
           quantityChanged: dto.adjustment,
-          reason: dto.reason,
+          reason,
+          inventoryAdjustmentReasonId: adjustmentReason?.id,
         },
       });
 
@@ -2196,9 +2226,44 @@ export class ProductService {
   ) {
     await this.access.ensureStoreAccess(storeId, user, 'view_store');
     const pagination = this.parsePagination(query);
+    const actionType = this.optionalInventoryActionType(
+      query.actionType,
+      'actionType',
+    );
+    const search = this.optionalSearch(query.search, 'search');
+    const where: Prisma.InventoryLogWhereInput = {
+      storeId,
+      ...(actionType ? { actionType } : {}),
+      ...(search
+        ? {
+            OR: [
+              { reason: { contains: search, mode: 'insensitive' } },
+              { productName: { contains: search, mode: 'insensitive' } },
+              { productBarcode: { contains: search, mode: 'insensitive' } },
+              ...(this.isPositiveIntegerText(search)
+                ? [{ productNumber: Number(search) }]
+                : []),
+              { product: { name: { contains: search, mode: 'insensitive' } } },
+              {
+                product: {
+                  barcode: { contains: search, mode: 'insensitive' },
+                },
+              },
+              ...(this.isPositiveIntegerText(search)
+                ? [{ product: { productNumber: Number(search) } }]
+                : []),
+              {
+                inventoryAdjustmentReason: {
+                  name: { contains: search, mode: 'insensitive' },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
 
     return this.prisma.inventoryLog.findMany({
-      where: { storeId },
+      where,
       orderBy: { createdAt: 'desc' },
       skip: pagination.skip,
       take: pagination.take,
@@ -2303,6 +2368,10 @@ export class ProductService {
       notes?: string | null;
       referenceType?: string | null;
       referenceId?: string | null;
+      productName?: string | null;
+      productBarcode?: string | null;
+      productNumber?: number | null;
+      inventoryAdjustmentReasonId?: string | null;
     },
   ) {
     return tx.inventoryLog.create({ data });
@@ -2821,8 +2890,18 @@ export class ProductService {
     return {
       storeId: this.requiredString(body.storeId, 'storeId'),
       productId: this.requiredString(body.productId, 'productId'),
-      adjustment: this.requiredNonZeroInt(body.adjustment, 'adjustment'),
-      reason: this.requiredString(body.reason, 'reason'),
+      adjustment: this.requiredNonZeroInt(
+        body.quantityChanged ?? body.adjustment,
+        'quantityChanged',
+      ),
+      inventoryAdjustmentReasonId: this.optionalString(
+        body.inventoryAdjustmentReasonId,
+        'inventoryAdjustmentReasonId',
+      ),
+      reason:
+        body.reason === undefined
+          ? null
+          : this.requiredString(body.reason, 'reason'),
       notes:
         body.notes === undefined
           ? undefined
@@ -3898,6 +3977,14 @@ export class ProductService {
     return this.requiredEnum(value, 'minimumAge', DepartmentMinimumAge);
   }
 
+  private optionalInventoryActionType(value: unknown, field: string) {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    return this.requiredEnum(value, field, InventoryActionType);
+  }
+
   private optionalPercentage(value: unknown, field: string) {
     if (value === undefined || value === null || value === '') {
       return null;
@@ -4726,6 +4813,7 @@ export class ProductService {
     product: true,
     staff: true,
     store: true,
+    inventoryAdjustmentReason: true,
   } satisfies Prisma.InventoryLogInclude;
 }
 
@@ -4834,7 +4922,8 @@ type InventoryAdjustmentDto = {
   storeId: string;
   productId: string;
   adjustment: number;
-  reason: string;
+  inventoryAdjustmentReasonId: string | null;
+  reason: string | null;
   notes?: string | null;
 };
 

@@ -1012,16 +1012,20 @@ model Department {
 }
 
 model InventoryLog {
-  id              String              @id @default(uuid())
-  actionType      InventoryActionType
-  quantityBefore  Int
-  quantityChanged Int
-  quantityAfter   Int
-  reason          String
-  notes           String?
-  referenceType   String?
-  referenceId     String?
-  createdAt       DateTime            @default(now())
+  id                          String              @id @default(uuid())
+  actionType                  InventoryActionType
+  quantityBefore              Int
+  quantityChanged             Int
+  quantityAfter               Int
+  reason                      String
+  notes                       String?
+  referenceType               String?
+  referenceId                 String?
+  productName                 String?
+  productBarcode              String?
+  productNumber               Int?
+  inventoryAdjustmentReasonId String?
+  createdAt                   DateTime            @default(now())
 
   storeId String
   store   Store  @relation(fields: [storeId], references: [id])
@@ -1032,12 +1036,15 @@ model InventoryLog {
   performedByStaffId String
   staff              Staff  @relation(fields: [performedByStaffId], references: [id])
 
+  inventoryAdjustmentReason InventoryAdjustmentReason? @relation(fields: [inventoryAdjustmentReasonId], references: [id])
+
   @@index([storeId, createdAt])
   @@index([storeId, productId, createdAt])
   @@index([productId, createdAt])
   @@index([performedByStaffId])
   @@index([actionType])
   @@index([referenceType, referenceId])
+  @@index([inventoryAdjustmentReasonId])
 }
 
 model InventoryAdjustmentReason {
@@ -1050,7 +1057,8 @@ model InventoryAdjustmentReason {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  store         Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  inventoryLogs InventoryLog[]
 
   @@unique([storeId, normalizedName])
   @@index([storeId, isActive])
