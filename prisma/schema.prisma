@@ -223,6 +223,12 @@ enum AuditEntityType {
   promotion
 }
 
+enum LoyaltyRedemptionMode {
+  PRODUCTS
+  CASHBACK
+  BOTH
+}
+
 enum PromotionType {
   BUY_X_GET_Y_FREE
   BUY_X_GET_Y_PERCENT_OFF
@@ -517,6 +523,7 @@ model Store {
   serviceSubscriptions       StoreServiceSubscription[]
   auditEvents                AuditEvent[]
   promotions                 Promotion[]
+  loyaltyPointsPrograms      LoyaltyPointsProgram[]
   inventoryAdjustmentReasons InventoryAdjustmentReason[]
   refundReasons              RefundReason[]
 
@@ -814,15 +821,16 @@ model Product {
   taxId String
   tax   Tax    @relation(fields: [taxId], references: [id])
 
-  inventoryLogs        InventoryLog[]
-  transactionItems     TransactionItem[]
-  purchaseItems        PurchaseItem[]
-  productVendors       ProductVendor[]
-  vendorOrderItems     VendorOrderItem[]
-  cartItems            CartItem[]
-  multiPacks           ProductMultiPack[]
-  multiPackProposals   MultiPackProposal[]
-  promotionAssignments PromotionProduct[]
+  inventoryLogs                InventoryLog[]
+  transactionItems             TransactionItem[]
+  purchaseItems                PurchaseItem[]
+  productVendors               ProductVendor[]
+  vendorOrderItems             VendorOrderItem[]
+  cartItems                    CartItem[]
+  multiPacks                   ProductMultiPack[]
+  multiPackProposals           MultiPackProposal[]
+  promotionAssignments         PromotionProduct[]
+  loyaltyPointsProgramProducts LoyaltyPointsProgramProduct[]
 
   @@unique([storeId, barcode])
   @@unique([storeId, productNumber])
@@ -838,6 +846,38 @@ model Product {
   @@index([priceGroupId])
   @@index([productCategoryId])
   @@index([taxId])
+}
+
+model LoyaltyPointsProgram {
+  id                  String                @id @default(uuid())
+  storeId             String
+  name                String
+  pointsEarned        Int
+  spendThresholdCents Int
+  pointValueCents     Int
+  redemptionMode      LoyaltyRedemptionMode
+  cashbackStoreWide   Boolean               @default(true)
+  isActive            Boolean               @default(true)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  store            Store                         @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  eligibleProducts LoyaltyPointsProgramProduct[]
+
+  @@index([storeId, isActive])
+  @@index([storeId, updatedAt])
+}
+
+model LoyaltyPointsProgramProduct {
+  programId String
+  productId String
+  createdAt DateTime @default(now())
+
+  program LoyaltyPointsProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  product Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([programId, productId])
+  @@index([productId])
 }
 
 model Promotion {

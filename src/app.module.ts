@@ -12,6 +12,7 @@ import { PrismaExceptionFilter } from './common/prisma-exception.filter';
 import { CustomerModule } from './customer/customer.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { MultiPackModule } from './multi-pack/multi-pack.module';
+import { LoyaltyModule } from './loyalty/loyalty.module';
 import { ProductModule } from './product/product.module';
 import { PromotionModule } from './promotion/promotion.module';
 import { PurchaseModule } from './purchase/purchase.module';
@@ -37,6 +38,7 @@ import { TransactionModule } from './transaction/transaction.module';
     CartModule,
     CustomerModule,
     DashboardModule,
+    LoyaltyModule,
     MultiPackModule,
     PermissionsModule,
     PurchaseModule,
