@@ -3,6 +3,8 @@ import {
   LoyaltyRedemptionMode,
   PunchCardRewardType,
   StaffRole,
+  StoreServiceKey,
+  StoreServiceStatus,
 } from '@prisma/client';
 import type { Mock } from 'jest-mock';
 import { PosAccessService } from '../common/pos-access.service';
@@ -58,6 +60,7 @@ describe('LoyaltyService points programs', () => {
   let access: { ensureStoreAccess: jest.Mock };
   let prisma: {
     product: { count: jest.Mock };
+    storeServiceSubscription: { findUnique: jest.Mock };
     loyaltyPointsProgram: {
       findMany: jest.Mock;
       findFirst: jest.Mock;
@@ -81,6 +84,12 @@ describe('LoyaltyService points programs', () => {
     };
     prisma = {
       product: { count: jest.fn().mockResolvedValue(1) },
+      storeServiceSubscription: {
+        findUnique: jest.fn().mockResolvedValue({
+          service: StoreServiceKey.loyalty,
+          status: StoreServiceStatus.active,
+        }),
+      },
       loyaltyPointsProgram: {
         findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(programFixture()),
@@ -267,6 +276,22 @@ describe('LoyaltyService points programs', () => {
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
+
+  it('rejects points program writes when loyalty is not active', async () => {
+    prisma.storeServiceSubscription.findUnique.mockResolvedValueOnce({
+      service: StoreServiceKey.loyalty,
+      status: StoreServiceStatus.canceled,
+    });
+
+    await expect(
+      service.createPointsProgram(
+        'store-1',
+        { ...baseInput, redemptionMode: 'CASHBACK', cashbackStoreWide: true },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(tx.loyaltyPointsProgram.create).not.toHaveBeenCalled();
+  });
 });
 
 describe('LoyaltyService punch card programs', () => {
@@ -275,6 +300,7 @@ describe('LoyaltyService punch card programs', () => {
   let prisma: {
     product: { count: jest.Mock };
     department: { count: jest.Mock };
+    storeServiceSubscription: { findUnique: jest.Mock };
     loyaltyPointsProgram: { findMany: jest.Mock; findFirst: jest.Mock };
     punchCardProgram: { findMany: jest.Mock; findFirst: jest.Mock };
     $transaction: jest.Mock;
@@ -334,6 +360,12 @@ describe('LoyaltyService punch card programs', () => {
     prisma = {
       product: { count: jest.fn().mockResolvedValue(1) },
       department: { count: jest.fn().mockResolvedValue(1) },
+      storeServiceSubscription: {
+        findUnique: jest.fn().mockResolvedValue({
+          service: StoreServiceKey.loyalty,
+          status: StoreServiceStatus.active,
+        }),
+      },
       loyaltyPointsProgram: {
         findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn().mockResolvedValue(programFixture()),
@@ -516,6 +548,15 @@ describe('LoyaltyService punch card programs', () => {
     await expect(
       service.createPunchCardProgram('store-1', departmentInput, user),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects punch card reads when loyalty is not active', async () => {
+    prisma.storeServiceSubscription.findUnique.mockResolvedValueOnce(null);
+
+    await expect(
+      service.getPunchCardProgram('store-1', 'punch-1', user),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.punchCardProgram.findFirst).not.toHaveBeenCalled();
   });
 
   it('GET returns the saved reward configuration', async () => {

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -7,6 +8,8 @@ import {
   LoyaltyRedemptionMode,
   PunchCardRewardType,
   StorePermissionKey,
+  StoreServiceKey,
+  StoreServiceStatus,
 } from '@prisma/client';
 import { AuthTokenPayload } from '../auth/strategies/jwt.strategy';
 import { PosAccessService } from '../common/pos-access.service';
@@ -437,14 +440,33 @@ export class LoyaltyService {
         StorePermissionKey.view_store,
       );
     }
+
+    await this.ensureLoyaltyAvailable(storeId);
   }
 
-  private ensureManage(storeId: string, user: AuthTokenPayload) {
-    return this.access.ensureStoreAccess(
+  private async ensureManage(storeId: string, user: AuthTokenPayload) {
+    await this.access.ensureStoreAccess(
       storeId,
       user,
       StorePermissionKey.manage_customers,
     );
+    await this.ensureLoyaltyAvailable(storeId);
+  }
+
+  private async ensureLoyaltyAvailable(storeId: string) {
+    const subscription = await this.prisma.storeServiceSubscription.findUnique({
+      where: {
+        storeId_service: {
+          storeId,
+          service: StoreServiceKey.loyalty,
+        },
+      },
+      select: { status: true },
+    });
+
+    if (subscription?.status !== StoreServiceStatus.active) {
+      throw new ForbiddenException('Loyalty is not active for this store');
+    }
   }
 
   private findPointsProgram(storeId: string, programId: string) {

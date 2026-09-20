@@ -354,20 +354,6 @@ export class TransactionService {
     return receipt.receiptData;
   }
 
-  async findReceiptByNumberWithoutUser(receiptNumber: string) {
-    const receipt = await this.prisma.receipt.findUnique({
-      where: {
-        receiptNumber: this.requiredString(receiptNumber, 'receiptNumber'),
-      },
-    });
-
-    if (!receipt) {
-      throw new NotFoundException('Receipt not found');
-    }
-
-    return receipt.receiptData;
-  }
-
   private async validateCartForStore(
     dto: CartDto,
     tx: Prisma.TransactionClient | PrismaService,
