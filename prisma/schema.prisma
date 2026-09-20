@@ -229,6 +229,11 @@ enum LoyaltyRedemptionMode {
   BOTH
 }
 
+enum PunchCardRewardType {
+  PERCENTAGE_DISCOUNT
+  FREE_PRODUCT
+}
+
 enum PromotionType {
   BUY_X_GET_Y_FREE
   BUY_X_GET_Y_PERCENT_OFF
@@ -524,6 +529,7 @@ model Store {
   auditEvents                AuditEvent[]
   promotions                 Promotion[]
   loyaltyPointsPrograms      LoyaltyPointsProgram[]
+  punchCardPrograms          PunchCardProgram[]
   inventoryAdjustmentReasons InventoryAdjustmentReason[]
   refundReasons              RefundReason[]
 
@@ -831,6 +837,7 @@ model Product {
   multiPackProposals           MultiPackProposal[]
   promotionAssignments         PromotionProduct[]
   loyaltyPointsProgramProducts LoyaltyPointsProgramProduct[]
+  punchCardFreeProductRewards  PunchCardProgram[]            @relation("PunchCardFreeProduct")
 
   @@unique([storeId, barcode])
   @@unique([storeId, productNumber])
@@ -878,6 +885,41 @@ model LoyaltyPointsProgramProduct {
 
   @@id([programId, productId])
   @@index([productId])
+}
+
+model PunchCardProgram {
+  id                      String              @id @default(uuid())
+  storeId                 String
+  name                    String
+  rewardType              PunchCardRewardType
+  discountPercentage      Decimal?            @db.Decimal(5, 2)
+  freeProductId           String?
+  requiredTransactions    Int
+  minimumTransactionCents Int
+  storeWide               Boolean             @default(true)
+  isActive                Boolean             @default(true)
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+
+  store               Store                        @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  freeProduct         Product?                     @relation("PunchCardFreeProduct", fields: [freeProductId], references: [id])
+  eligibleDepartments PunchCardProgramDepartment[]
+
+  @@index([storeId, isActive])
+  @@index([storeId, updatedAt])
+  @@index([freeProductId])
+}
+
+model PunchCardProgramDepartment {
+  programId    String
+  departmentId String
+  createdAt    DateTime @default(now())
+
+  program    PunchCardProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  department Department       @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@id([programId, departmentId])
+  @@index([departmentId])
 }
 
 model Promotion {
@@ -1041,8 +1083,9 @@ model Department {
   defaultTaxId String?
   defaultTax   Tax?    @relation(fields: [defaultTaxId], references: [id])
 
-  products          Product[]
-  productCategories ProductCategory[]
+  products                    Product[]
+  productCategories           ProductCategory[]
+  punchCardProgramDepartments PunchCardProgramDepartment[]
 
   @@unique([storeId, name])
   @@unique([storeId, posDepartmentNumber])

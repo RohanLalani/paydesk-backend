@@ -1,5 +1,9 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { LoyaltyRedemptionMode, StaffRole } from '@prisma/client';
+import {
+  LoyaltyRedemptionMode,
+  PunchCardRewardType,
+  StaffRole,
+} from '@prisma/client';
 import type { Mock } from 'jest-mock';
 import { PosAccessService } from '../common/pos-access.service';
 import { PrismaService } from '../prisma.service';
@@ -262,5 +266,296 @@ describe('LoyaltyService points programs', () => {
         user,
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('LoyaltyService punch card programs', () => {
+  let service: LoyaltyService;
+  let access: { ensureStoreAccess: jest.Mock };
+  let prisma: {
+    product: { count: jest.Mock };
+    department: { count: jest.Mock };
+    loyaltyPointsProgram: { findMany: jest.Mock; findFirst: jest.Mock };
+    punchCardProgram: { findMany: jest.Mock; findFirst: jest.Mock };
+    $transaction: jest.Mock;
+  };
+  let tx: {
+    punchCardProgram: { create: jest.Mock; update: jest.Mock };
+    punchCardProgramDepartment: { deleteMany: jest.Mock };
+  };
+
+  const percentageInput = {
+    name: 'Coffee Punch Card',
+    rewardType: 'PERCENTAGE_DISCOUNT',
+    discountPercentage: 20,
+    requiredTransactions: 10,
+    minimumTransactionCents: 500,
+    storeWide: true,
+  };
+
+  const departmentInput = {
+    ...percentageInput,
+    storeWide: false,
+    eligibleDepartmentIds: ['department-1'],
+  };
+
+  function punchCardFixture(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'punch-1',
+      storeId: 'store-1',
+      name: 'Coffee Punch Card',
+      rewardType: PunchCardRewardType.PERCENTAGE_DISCOUNT,
+      discountPercentage: 20,
+      freeProductId: null,
+      requiredTransactions: 10,
+      minimumTransactionCents: 500,
+      storeWide: true,
+      isActive: true,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      freeProduct: null,
+      eligibleDepartments: [
+        { department: { id: 'department-1', name: 'Coffee' } },
+      ],
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    tx = {
+      punchCardProgram: {
+        create: jest.fn().mockResolvedValue(punchCardFixture()),
+        update: jest.fn().mockResolvedValue(punchCardFixture()),
+      },
+      punchCardProgramDepartment: {
+        deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+    prisma = {
+      product: { count: jest.fn().mockResolvedValue(1) },
+      department: { count: jest.fn().mockResolvedValue(1) },
+      loyaltyPointsProgram: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(programFixture()),
+      },
+      punchCardProgram: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(punchCardFixture()),
+      },
+      $transaction: jest.fn((callback: (transaction: typeof tx) => unknown) =>
+        callback(tx),
+      ),
+    };
+    access = {
+      ensureStoreAccess: jest.fn().mockResolvedValue({ id: 'store-1' }),
+    };
+    service = new LoyaltyService(
+      prisma as unknown as PrismaService,
+      access as unknown as PosAccessService,
+    );
+  });
+
+  function punchWriteArgs(mock: Mock) {
+    return mock.mock.calls[0][0] as {
+      data: {
+        rewardType: PunchCardRewardType;
+        discountPercentage: number | null;
+        freeProductId: string | null;
+        requiredTransactions: number;
+        minimumTransactionCents: number;
+        storeWide: boolean;
+        eligibleDepartments: { create: Array<{ departmentId: string }> };
+      };
+    };
+  }
+
+  it('saves a percentage punch card program', async () => {
+    await service.createPunchCardProgram('store-1', percentageInput, user);
+
+    expect(punchWriteArgs(tx.punchCardProgram.create).data).toMatchObject({
+      rewardType: PunchCardRewardType.PERCENTAGE_DISCOUNT,
+      discountPercentage: 20,
+      freeProductId: null,
+      requiredTransactions: 10,
+      minimumTransactionCents: 500,
+      storeWide: true,
+      eligibleDepartments: { create: [] },
+    });
+  });
+
+  it('rejects zero percentage discounts', async () => {
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        { ...percentageInput, discountPercentage: 0 },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects percentage discounts above 100', async () => {
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        { ...percentageInput, discountPercentage: 101 },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects free product rewards without a product', async () => {
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        {
+          ...percentageInput,
+          rewardType: 'FREE_PRODUCT',
+          discountPercentage: null,
+        },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('saves a free product reward with a valid store product', async () => {
+    await service.createPunchCardProgram(
+      'store-1',
+      {
+        ...percentageInput,
+        rewardType: 'FREE_PRODUCT',
+        discountPercentage: null,
+        freeProductId: 'product-1',
+      },
+      user,
+    );
+
+    expect(punchWriteArgs(tx.punchCardProgram.create).data).toMatchObject({
+      rewardType: PunchCardRewardType.FREE_PRODUCT,
+      discountPercentage: null,
+      freeProductId: 'product-1',
+    });
+  });
+
+  it('rejects free products from another store', async () => {
+    prisma.product.count.mockResolvedValueOnce(0);
+
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        {
+          ...percentageInput,
+          rewardType: 'FREE_PRODUCT',
+          discountPercentage: null,
+          freeProductId: 'other-product',
+        },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects zero required transactions', async () => {
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        { ...percentageInput, requiredTransactions: 0 },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects decimal required transactions', async () => {
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        { ...percentageInput, requiredTransactions: 1.5 },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('accepts a zero minimum transaction amount', async () => {
+    await service.createPunchCardProgram(
+      'store-1',
+      { ...percentageInput, minimumTransactionCents: 0 },
+      user,
+    );
+
+    expect(
+      punchWriteArgs(tx.punchCardProgram.create).data.minimumTransactionCents,
+    ).toBe(0);
+  });
+
+  it('does not require departments for store-wide programs', async () => {
+    await service.createPunchCardProgram('store-1', percentageInput, user);
+
+    expect(prisma.department.count).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-store-wide programs with no departments', async () => {
+    await expect(
+      service.createPunchCardProgram(
+        'store-1',
+        { ...percentageInput, storeWide: false, eligibleDepartmentIds: [] },
+        user,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('saves non-store-wide programs with valid departments', async () => {
+    await service.createPunchCardProgram('store-1', departmentInput, user);
+
+    expect(punchWriteArgs(tx.punchCardProgram.create).data).toMatchObject({
+      storeWide: false,
+      eligibleDepartments: { create: [{ departmentId: 'department-1' }] },
+    });
+  });
+
+  it('rejects departments from another store', async () => {
+    prisma.department.count.mockResolvedValueOnce(0);
+
+    await expect(
+      service.createPunchCardProgram('store-1', departmentInput, user),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('GET returns the saved reward configuration', async () => {
+    const result = await service.getPunchCardProgram(
+      'store-1',
+      'punch-1',
+      user,
+    );
+
+    expect(result.discountPercentage).toBe(20);
+    expect(result.eligibleDepartments).toEqual([
+      { id: 'department-1', name: 'Coffee' },
+    ]);
+  });
+
+  it('PATCH updates reward type and qualification rules', async () => {
+    await service.updatePunchCardProgram(
+      'store-1',
+      'punch-1',
+      {
+        ...departmentInput,
+        rewardType: 'FREE_PRODUCT',
+        discountPercentage: null,
+        freeProductId: 'product-1',
+        requiredTransactions: 12,
+        minimumTransactionCents: 1000,
+      },
+      user,
+    );
+
+    expect(tx.punchCardProgramDepartment.deleteMany).toHaveBeenCalledWith({
+      where: { programId: 'punch-1' },
+    });
+    expect(punchWriteArgs(tx.punchCardProgram.update).data).toMatchObject({
+      rewardType: PunchCardRewardType.FREE_PRODUCT,
+      freeProductId: 'product-1',
+      requiredTransactions: 12,
+      minimumTransactionCents: 1000,
+      storeWide: false,
+      eligibleDepartments: { create: [{ departmentId: 'department-1' }] },
+    });
   });
 });
